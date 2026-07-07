@@ -1,0 +1,25 @@
+[versions]
+jackson = "2.18.2"
+slf4j = "2.0.16"
+logback = "1.5.12"
+richtextfx = "0.11.3"
+junit = "5.11.3"
+assertj = "3.26.3"
+archunit = "1.3.0"
+openjfx-plugin = "0.1.0"
+javafx = "21.0.2"
+
+[libraries]
+jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
+jackson-yaml = { module = "com.fasterxml.jackson.dataformat:jackson-dataformat-yaml", version.ref = "jackson" }
+slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
+logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
+richtextfx = { module = "org.fxmisc.richtext:richtextfx", version.ref = "richtextfx" }
+junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
+assertj-core = { module = "org.assertj:assertj-core", version.ref = "assertj" }
+archunit-junit5 = { module = "com.tngtech.archunit:archunit-junit5", version.ref = "archunit" }
+
+[plugins]
+javafx = { id = "org.openjfx.javafxplugin", version.ref = "openjfx-plugin" }

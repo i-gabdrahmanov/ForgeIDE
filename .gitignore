@@ -25,3 +25,12 @@ replay_pid*
 
 #IDE
 .idea
+
+# Gradle
+build/
+.gradle/
+out/
+!gradle/wrapper/gradle-wrapper.jar
+
+# macOS
+.DS_Store
