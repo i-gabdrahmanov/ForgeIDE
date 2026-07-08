@@ -53,9 +53,12 @@ public final class ProcessRunner {
      * still being produced.
      *
      * @param onStdoutLine invoked once per stdout line, in order, after it has been durably
-     *                     appended to {@link ProcessSpec#stdoutLog()}
+     *                     appended to {@link ProcessSpec#stdoutLog()}; throwing {@link
+     *                     ProcessKillSignal} kills the process group immediately, the same as
+     *                     hitting the timeout or output cap
      * @param onStderrLine invoked once per stderr line, in order, after it has been durably
-     *                     appended to {@link ProcessSpec#stderrLog()}
+     *                     appended to {@link ProcessSpec#stderrLog()}; also honors {@link
+     *                     ProcessKillSignal}
      */
     public ProcessOutcome run(ProcessSpec spec, Consumer<ParsedLine> onStdoutLine, Consumer<String> onStderrLine) {
         Instant start = Instant.now();
@@ -159,7 +162,12 @@ public final class ProcessRunner {
                     kill.run();
                     break;
                 }
-                onLine.accept(parseLine(line));
+                try {
+                    onLine.accept(parseLine(line));
+                } catch (ProcessKillSignal killSignal) {
+                    kill.run();
+                    break;
+                }
             }
         } catch (IOException e) {
             // A forced kill (timeout/output-cap/external) races with this thread's blocking
@@ -184,7 +192,12 @@ public final class ProcessRunner {
                     kill.run();
                     break;
                 }
-                onLine.accept(line);
+                try {
+                    onLine.accept(line);
+                } catch (ProcessKillSignal killSignal) {
+                    kill.run();
+                    break;
+                }
             }
         } catch (IOException e) {
             log.debug("stderr pump for {} ended: {}", spec.command(), e.toString());

@@ -23,6 +23,7 @@ import dev.forgeide.core.port.ScriptRunnerException;
 import dev.forgeide.core.port.ScriptRunnerPort;
 import dev.forgeide.core.port.StateStore;
 import dev.forgeide.core.project.ProjectDefinition;
+import dev.forgeide.core.project.RuntimeBinding;
 import dev.forgeide.core.run.FailureReason;
 import dev.forgeide.core.run.JudgeVerdict;
 import dev.forgeide.core.run.PendingQuestion;
@@ -200,14 +201,14 @@ public final class PipelineEngine implements AutoCloseable {
             project.paramValues().forEach(resolverBuilder::param);
             VariableResolver resolver = resolverBuilder.build();
 
-            RunContext ctx = new RunContext(run, project.repositoryPath(), resolver, stepDefs, promptSnapshots);
+            RunContext ctx = new RunContext(run, project, resolver, stepDefs, promptSnapshots);
             runs.put(runId, ctx);
             persistAndPublish(ctx);
             advance(ctx);
         } catch (RuntimeException ex) {
             log.error("failed to start run {} for feature {}", runId, featureSlug, ex);
             run.pause(RunHaltReason.ENGINE_ERROR);
-            runs.put(runId, new RunContext(run, project.repositoryPath(), MapVariableResolver.builder().build(),
+            runs.put(runId, new RunContext(run, project, MapVariableResolver.builder().build(),
                     stepDefs, Map.of()));
             persistAndPublish(runs.get(runId));
         }
@@ -482,6 +483,11 @@ public final class PipelineEngine implements AutoCloseable {
     }
 
     private void dispatchAgent(RunContext ctx, AgentStep step) {
+        Optional<RuntimeBinding> binding = ctx.project.runtime(step.runtimeRef());
+        if (binding.isEmpty()) {
+            haltOnEngineError(ctx, step.id(), "unknown runtime '" + step.runtimeRef() + "'");
+            return;
+        }
         RunId runId = ctx.run.id();
         int iteration = markRunning(ctx, step.id());
         workers.execute(() -> {
@@ -494,12 +500,25 @@ public final class PipelineEngine implements AutoCloseable {
                     return;
                 }
                 String prompt = appendContextBlocks(ctx, step.id(), ctx.resolver.render(raw));
+                Path logDir = logDir(ctx, step.id(), iteration);
                 AgentInvocation invocation = new AgentInvocation(ctx.projectRoot, prompt,
-                        step.budget().wallClock(), step.budget().tokens(), Map.of());
+                        step.budget().wallClock(), step.budget().tokens(),
+                        step.budget().outputMb() * 1024L * 1024L, logDir, binding.get(), Map.of());
                 AgentResult result = agentRuntime.execute(invocation, event -> { });
+                if (result.usage().total() > step.budget().tokens()) {
+                    submit(new EngineCommand.StepFailed(runId, step.id(), iteration, FailureReason.BUDGET,
+                            "token usage " + result.usage().total() + " exceeded budget " + step.budget().tokens()));
+                    return;
+                }
                 if (result.finalJson().isEmpty()) {
                     submit(new EngineCommand.StepFailed(runId, step.id(), iteration, FailureReason.STREAM,
                             "no result event"));
+                    return;
+                }
+                Optional<String> artifactError = ArtifactValidation.validate(ctx.projectRoot, step.expectedArtifacts());
+                if (artifactError.isPresent()) {
+                    submit(new EngineCommand.StepFailed(runId, step.id(), iteration, FailureReason.ARTIFACTS,
+                            artifactError.get()));
                     return;
                 }
                 List<PendingQuestion> questions = PendingQuestions.parse(result.finalJson().get());
@@ -509,6 +528,12 @@ public final class PipelineEngine implements AutoCloseable {
                         String.valueOf(ex.getMessage())));
             }
         });
+    }
+
+    /** {@code ground/ai-logs/<feature>/iter-NN/<step>/} (SD §6.2). */
+    private static Path logDir(RunContext ctx, String stepId, int iteration) {
+        return ctx.projectRoot.resolve("ground").resolve("ai-logs")
+                .resolve(ctx.run.featureSlug()).resolve("iter-" + iteration).resolve(stepId);
     }
 
     private String appendContextBlocks(RunContext ctx, String stepId, String rendered) {
@@ -527,8 +552,19 @@ public final class PipelineEngine implements AutoCloseable {
     }
 
     private void dispatchJudge(RunContext ctx, JudgeStep judge) {
+        RuntimeBinding llmBinding = null;
+        if (judge.llmJudge().isPresent()) {
+            String ref = judge.llmJudge().get().runtimeRef();
+            Optional<RuntimeBinding> resolved = ctx.project.runtime(ref);
+            if (resolved.isEmpty()) {
+                haltOnEngineError(ctx, judge.id(), "unknown runtime '" + ref + "'");
+                return;
+            }
+            llmBinding = resolved.get();
+        }
         RunId runId = ctx.run.id();
         int iteration = markRunning(ctx, judge.id());
+        RuntimeBinding finalLlmBinding = llmBinding;
         workers.execute(() -> {
             try {
                 boolean deterministicPassed = true;
@@ -545,8 +581,10 @@ public final class PipelineEngine implements AutoCloseable {
                     AgentStep llm = judge.llmJudge().get();
                     String templateKey = ctx.templateKeyOf.getOrDefault(judge.id(), judge.id()) + ".llm";
                     String raw = ctx.promptSnapshots.getOrDefault(templateKey, "");
+                    Path logDir = logDir(ctx, judge.id(), iteration).resolve("llm");
                     AgentInvocation invocation = new AgentInvocation(ctx.projectRoot, ctx.resolver.render(raw),
-                            llm.budget().wallClock(), llm.budget().tokens(), Map.of());
+                            llm.budget().wallClock(), llm.budget().tokens(),
+                            llm.budget().outputMb() * 1024L * 1024L, logDir, finalLlmBinding, Map.of());
                     AgentResult result = agentRuntime.execute(invocation, event -> { });
                     boolean llmPassed = result.finalJson().map(PipelineEngine::isLlmPass).orElse(false);
                     if (!detail.isEmpty()) {

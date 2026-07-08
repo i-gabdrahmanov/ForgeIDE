@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"s2","model":"gigacode-fixture"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"working..."}],"usage":{"input_tokens":30,"output_tokens":10}}}
