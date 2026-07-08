@@ -83,4 +83,33 @@ class StepRunTest {
         assertThatThrownBy(() -> snapshot.verdicts().add(new JudgeVerdict(2, Optional.empty(), false, "x")))
                 .isInstanceOf(UnsupportedOperationException.class);
     }
+
+    @Test
+    void restoreReproducesTheSnapshotExactlyIncludingAFailureReason() {
+        StepRun original = new StepRun("s1");
+        original.startIteration();
+        original.startIteration();
+        original.recordVerdict(new JudgeVerdict(1, Optional.of(false), false, "nope"));
+        original.recordEvent(new AuditRef(7L, "step.running"));
+        original.markFailed(FailureReason.BUDGET);
+
+        StepRun restored = StepRun.restore(original.snapshot());
+
+        assertThat(restored.snapshot()).isEqualTo(original.snapshot());
+        assertThat(restored.status()).isEqualTo(StepStatus.FAILED);
+        assertThat(restored.failureReason()).contains(FailureReason.BUDGET);
+        assertThat(restored.iteration()).isEqualTo(2);
+    }
+
+    @Test
+    void restorePreservesWaitingInputQuestions() {
+        StepRun original = new StepRun("s1");
+        PendingQuestion question = new PendingQuestion("q1", "Which epic?", QuestionType.TEXT, List.of(), Optional.empty());
+        original.awaitInput(List.of(question));
+
+        StepRun restored = StepRun.restore(original.snapshot());
+
+        assertThat(restored.status()).isEqualTo(StepStatus.WAITING_INPUT);
+        assertThat(restored.pendingQuestions()).containsExactly(question);
+    }
 }

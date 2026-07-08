@@ -89,6 +89,9 @@ final class PipelineWriter {
         putDepends(node, s.dependsOn());
         node.set("command", strings(s.command()));
         node.put("timeout", Durations.format(s.timeout()));
+        ObjectNode retry = node.putObject("retry");
+        retry.put("stream", s.retry().stream());
+        retry.put("script", s.retry().script());
     }
 
     private void writeJudge(ObjectNode node, JudgeStep j) {

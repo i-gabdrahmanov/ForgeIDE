@@ -81,7 +81,7 @@ final class TemplateExpansion {
         return switch (step) {
             case AgentStep a -> new AgentStep(newId, newDeps, a.runtimeRef(), a.promptTemplate(),
                     a.expectedArtifacts(), a.allowedWrite(), a.envScope(), a.retry(), a.budget());
-            case ScriptStep s -> new ScriptStep(newId, newDeps, s.command(), s.timeout());
+            case ScriptStep s -> new ScriptStep(newId, newDeps, s.command(), s.timeout(), s.retry());
             case JudgeStep j -> new JudgeStep(newId, newDeps,
                     remapIfLocal(j.targetStepId(), loopId, taskId, localIds),
                     j.llmJudge(), j.deterministicCheck(), j.failPolicy());

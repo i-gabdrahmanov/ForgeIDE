@@ -100,6 +100,28 @@ public final class PipelineRun {
         this.haltReason = Objects.requireNonNull(reason, "reason");
     }
 
+    /**
+     * Rehydrates a live {@code PipelineRun} from a persisted {@link RunSnapshot} (SDD FR-3.4:
+     * engine resume after an IDE restart) — every step is restored exactly as recorded, including
+     * one already turned {@code FAILED(interrupted)} by {@link RunRecovery}, rather than starting
+     * fresh at {@code PENDING} the way the normal constructor does.
+     */
+    public static PipelineRun restore(RunSnapshot snapshot) {
+        List<String> stepIds = snapshot.steps().stream().map(StepSnapshot::stepId).toList();
+        PipelineRun run = new PipelineRun(snapshot.runId(), snapshot.featureSlug(), stepIds);
+        for (StepSnapshot stepSnapshot : snapshot.steps()) {
+            run.steps.put(stepSnapshot.stepId(), StepRun.restore(stepSnapshot));
+        }
+        switch (snapshot.status()) {
+            case COMPLETED -> run.complete();
+            case CANCELLED -> run.cancel();
+            case PAUSED -> run.pause(snapshot.haltReason().orElseThrow());
+            case STOPPED -> run.stop(snapshot.haltReason().orElseThrow());
+            case RUNNING -> { /* already RUNNING from the constructor above */ }
+        }
+        return run;
+    }
+
     public RunSnapshot snapshot() {
         List<StepSnapshot> stepSnapshots = steps.values().stream().map(StepRun::snapshot).toList();
         return new RunSnapshot(id, featureSlug, status, haltReason(), stepSnapshots);

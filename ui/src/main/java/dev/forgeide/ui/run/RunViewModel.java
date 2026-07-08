@@ -38,6 +38,12 @@ public final class RunViewModel {
         engine.submit(new EngineCommand.CancelRun(runId));
     }
 
+    /** Manual retry of a FAILED step (T11 scope; the engine itself refuses one still pending
+     * investigation as an incident — SDD FR-11's tamper/scope class). */
+    public void retry(String stepId) {
+        engine.submit(new EngineCommand.RetryStep(runId, stepId));
+    }
+
     /** Stops listening — call when the {@link RunView} is closed/navigated away from. */
     public void dispose() {
         engine.unsubscribe(listener);

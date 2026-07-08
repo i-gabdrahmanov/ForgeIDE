@@ -73,4 +73,30 @@ class PipelineRunTest {
         assertThat(snapshot.steps().stream().filter(s -> s.stepId().equals("a")).findFirst().orElseThrow().status())
                 .isEqualTo(StepStatus.READY);
     }
+
+    @Test
+    void restoreReproducesEveryStepAndTheRunLevelStatus() {
+        PipelineRun original = new PipelineRun(RunId.newId(), "feature-x", List.of("a", "b"));
+        original.step("a").transitionTo(StepStatus.PASSED);
+        original.step("b").markFailed(FailureReason.INTERRUPTED);
+
+        PipelineRun restored = PipelineRun.restore(original.snapshot());
+
+        assertThat(restored.snapshot()).isEqualTo(original.snapshot());
+        assertThat(restored.status()).isEqualTo(RunStatus.RUNNING);
+        assertThat(restored.step("a").status()).isEqualTo(StepStatus.PASSED);
+        assertThat(restored.step("b").status()).isEqualTo(StepStatus.FAILED);
+        assertThat(restored.step("b").failureReason()).contains(FailureReason.INTERRUPTED);
+    }
+
+    @Test
+    void restoreReproducesAPausedRunAndItsHaltReason() {
+        PipelineRun original = new PipelineRun(RunId.newId(), "feature-x", List.of("a"));
+        original.pause(RunHaltReason.ENGINE_ERROR);
+
+        PipelineRun restored = PipelineRun.restore(original.snapshot());
+
+        assertThat(restored.status()).isEqualTo(RunStatus.PAUSED);
+        assertThat(restored.haltReason()).contains(RunHaltReason.ENGINE_ERROR);
+    }
 }

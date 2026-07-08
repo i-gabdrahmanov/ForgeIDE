@@ -25,6 +25,22 @@ public final class StepRun {
         this.iteration = 0;
     }
 
+    /**
+     * Rehydrates a step exactly as persisted (SDD FR-3.4: engine resume after an IDE restart) —
+     * bypasses the normal transition methods entirely, since this is loading recorded ground
+     * truth rather than deciding a new transition.
+     */
+    static StepRun restore(StepSnapshot snapshot) {
+        StepRun run = new StepRun(snapshot.stepId());
+        run.status = snapshot.status();
+        run.iteration = snapshot.iteration();
+        run.failureReason = snapshot.failureReason().orElse(null);
+        run.pendingQuestions = snapshot.pendingQuestions();
+        run.verdicts.addAll(snapshot.verdicts());
+        run.events.addAll(snapshot.events());
+        return run;
+    }
+
     public String stepId() {
         return stepId;
     }

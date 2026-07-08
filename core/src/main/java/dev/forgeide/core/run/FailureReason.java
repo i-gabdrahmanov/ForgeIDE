@@ -19,5 +19,15 @@ public enum FailureReason {
     /** IDE was killed or the run was cancelled mid-phase. */
     INTERRUPTED,
     /** Non-zero exit code from a script step. */
-    SCRIPT
+    SCRIPT;
+
+    /**
+     * Failures that are security incidents (SDD FR-7.6's "tamper/scope/drift" class) stay FAILED
+     * until a human has investigated, even though the step technically sits in the ordinary
+     * {@code FAILED} state — {@link dev.forgeide.core.engine.PipelineEngine} refuses a plain
+     * manual retry for these (T11 scope; the producers themselves are T16/T19).
+     */
+    public boolean blocksManualRetry() {
+        return this == SCOPE || this == TAMPERED;
+    }
 }

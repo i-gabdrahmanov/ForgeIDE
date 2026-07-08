@@ -12,6 +12,7 @@ import dev.forgeide.core.run.RunId;
 import dev.forgeide.core.run.RunSnapshot;
 import dev.forgeide.core.run.RunStatus;
 import dev.forgeide.core.run.StepSnapshot;
+import dev.forgeide.core.run.StepStatus;
 import dev.forgeide.runtime.state.RunExporter;
 import dev.forgeide.ui.canvas.CanvasView;
 import javafx.application.Platform;
@@ -80,6 +81,7 @@ public final class RunView extends BorderPane {
 
         Button back = new Button("← Back");
         Button cancel = new Button("Cancel run");
+        Button retry = new Button("Retry step");
         Button export = new Button("Export…");
         Label status = new Label();
         back.setOnAction(e -> {
@@ -87,8 +89,14 @@ public final class RunView extends BorderPane {
             onBack.run();
         });
         cancel.setOnAction(e -> viewModel.cancel());
+        retry.setOnAction(e -> {
+            if (selectedStep != null) {
+                viewModel.retry(selectedStep.id());
+            }
+        });
+        retry.setDisable(true);
         export.setOnAction(e -> exportRun());
-        HBox header = new HBox(12, back, new Label(project.name() + " · " + featureSlug), cancel, export, status);
+        HBox header = new HBox(12, back, new Label(project.name() + " · " + featureSlug), cancel, retry, export, status);
         header.setAlignment(Pos.CENTER_LEFT);
         header.setPadding(new Insets(12));
         setTop(header);
@@ -97,6 +105,7 @@ public final class RunView extends BorderPane {
             selectedStep = step;
             lastTargetIteration = -1;
             retargetLog();
+            retry.setDisable(!isSelectedStepFailed());
         });
 
         viewModel.snapshotProperty().addListener((obs, old, snapshot) -> {
@@ -108,9 +117,28 @@ public final class RunView extends BorderPane {
             boolean terminal = snapshot.status() == RunStatus.COMPLETED || snapshot.status() == RunStatus.CANCELLED
                     || snapshot.status() == RunStatus.STOPPED;
             cancel.setDisable(terminal);
+            retry.setDisable(!isSelectedStepFailed());
             retargetLog();
         });
         Optional.ofNullable(viewModel.snapshotProperty().get()).ifPresent(canvas::applyRunSnapshot);
+    }
+
+    /** {@code Retry step} is only ever enabled for the selected tile's own current status — the
+     * engine still has the last word (a FAILED step blocked on an incident, T11 scope, is a no-op
+     * even if this fires). */
+    private boolean isSelectedStepFailed() {
+        if (selectedStep == null) {
+            return false;
+        }
+        RunSnapshot snapshot = viewModel.snapshotProperty().get();
+        if (snapshot == null) {
+            return false;
+        }
+        return snapshot.steps().stream()
+                .filter(s -> s.stepId().equals(selectedStep.id()))
+                .findFirst()
+                .map(s -> s.status() == StepStatus.FAILED)
+                .orElse(false);
     }
 
     /** Called from the Timeline's "jump to log" action. */
