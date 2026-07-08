@@ -1,0 +1,7 @@
+version: 1
+id: uv
+steps:
+  - id: a
+    type: agent
+    runtime: gigacode
+    prompt: prompts/${bogus.name}.md

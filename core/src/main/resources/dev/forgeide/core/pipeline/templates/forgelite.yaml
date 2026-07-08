@@ -1,0 +1,92 @@
+# forgelite — минимальный TDD-пайплайн Forge (SD §5, FORGE.md/pipeline-technical.md).
+# ground → design → (gate) → red → judge → green → judge → (gate) → deliver.
+# Пути prompt/check привязывает импортёр обвязки (T24); поля безопасности — SDD §5.1.
+version: 1
+id: forgelite
+
+params:
+  jira_key:
+    required: true
+    hint: "Ключ задачи Jira (source of truth требований)"
+  spec_path:
+    required: true
+    hint: "Путь к спецификации проекта"
+
+steps:
+  - id: lite-ground
+    type: agent
+    runtime: gigacode
+    prompt: prompts/lite-ground.md
+    expects: [ground/grounding-excerpt.json]
+    allowed_write: [ground/**]
+    env_scope: []
+    budget: {tokens: 2_000_000, wall_clock: 20m, output_mb: 256}
+    retry: {stream: 1, script: 0}
+
+  - id: lite-design
+    type: agent
+    runtime: gigacode
+    depends_on: [lite-ground]
+    prompt: prompts/lite-design.md
+    expects:
+      - docs/forgelite/${feature.slug}/tech-design.md
+      - docs/forgelite/${feature.slug}/task-plan.json
+    allowed_write: [docs/**]
+    env_scope: []
+    budget: {tokens: 2_000_000, wall_clock: 30m, output_mb: 256}
+
+  - id: gate-design
+    type: gate
+    depends_on: [lite-design]
+    question: "Утвердить tech-design?"
+    options: [Утвердить, Отклонить]
+    show:
+      - docs/forgelite/${feature.slug}/tech-design.md
+
+  - id: lite-red
+    type: agent
+    runtime: gigacode
+    depends_on: [gate-design]
+    prompt: prompts/lite-red.md
+    expects: [src/test/**]
+    allowed_write: [src/test/**]
+    env_scope: []
+    budget: {tokens: 2_000_000, wall_clock: 30m, output_mb: 256}
+
+  - id: judge-red
+    type: judge
+    target: lite-red
+    check:
+      command: [python3, .gigacode/skills/forgelite/scripts/check_tests_red.py]
+      timeout: 5m
+    fail_policy: {max_iterations: 3}
+
+  - id: lite-green
+    type: agent
+    runtime: gigacode
+    depends_on: [judge-red]
+    prompt: prompts/lite-green.md
+    expects: [src/main/**]
+    allowed_write: [src/**, build/**]
+    env_scope: []
+    budget: {tokens: 4_000_000, wall_clock: 40m, output_mb: 512}
+
+  - id: judge-coverage
+    type: judge
+    target: lite-green
+    check:
+      command: [python3, .gigacode/skills/forgelite/scripts/check_coverage.py]
+      timeout: 10m
+    fail_policy: {max_iterations: 3}
+
+  - id: gate-deliver
+    type: gate
+    depends_on: [judge-coverage]
+    question: "Доставить изменения (git push + PR)?"
+    options: [Доставить, Отклонить]
+
+  - id: deliver
+    type: outward
+    depends_on: [gate-deliver]
+    actions: [git_push, create_pr]
+    env_scope: [GIT_TOKEN]

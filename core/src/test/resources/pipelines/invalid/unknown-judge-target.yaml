@@ -1,0 +1,12 @@
+version: 1
+id: jt
+steps:
+  - id: a
+    type: agent
+    runtime: gigacode
+    prompt: prompts/a.md
+  - id: j
+    type: judge
+    target: ghost
+    check:
+      command: [python3, check.py]

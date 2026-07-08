@@ -1,0 +1,5 @@
+id: nv
+steps:
+  - id: a
+    type: script
+    command: [echo, one]

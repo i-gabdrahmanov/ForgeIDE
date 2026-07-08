@@ -8,10 +8,16 @@ import java.util.Set;
 /**
  * What is stored in {@code <project>/.forgeide/pipeline.yaml} and rendered on the canvas.
  */
-public record PipelineDefinition(String id, int version, List<StepDefinition> steps) {
+public record PipelineDefinition(String id, int version, List<PipelineParam> params, List<StepDefinition> steps) {
+
+    /** Convenience for a pipeline without declared params (keeps older call sites terse). */
+    public PipelineDefinition(String id, int version, List<StepDefinition> steps) {
+        this(id, version, List.of(), steps);
+    }
 
     public PipelineDefinition {
         Objects.requireNonNull(id, "id");
+        params = List.copyOf(params);
         steps = List.copyOf(steps);
         Set<String> seen = new HashSet<>();
         for (StepDefinition step : steps) {

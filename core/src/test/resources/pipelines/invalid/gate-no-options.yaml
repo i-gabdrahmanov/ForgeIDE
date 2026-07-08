@@ -1,0 +1,6 @@
+version: 1
+id: go
+steps:
+  - id: g
+    type: gate
+    question: "Proceed?"
