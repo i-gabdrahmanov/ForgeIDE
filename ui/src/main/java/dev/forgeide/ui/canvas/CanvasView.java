@@ -5,6 +5,7 @@ import dev.forgeide.core.pipeline.StepDefinition;
 import dev.forgeide.core.pipeline.TileValidity;
 import dev.forgeide.core.pipeline.validation.PipelineError;
 import dev.forgeide.core.port.TileValidityChecker;
+import dev.forgeide.core.run.RunSnapshot;
 import javafx.beans.property.ObjectProperty;
 import javafx.beans.property.SimpleObjectProperty;
 import javafx.geometry.Insets;
@@ -25,6 +26,7 @@ import javafx.scene.transform.Scale;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Read-only node-graph canvas (SD §7, T05): tiles placed by {@link CanvasLayout}, edges drawn as
@@ -73,6 +75,22 @@ public final class CanvasView extends BorderPane {
 
     public ObjectProperty<StepDefinition> selectedStepProperty() {
         return selectedStep;
+    }
+
+    /**
+     * Overlays a run's live status onto the tiles built from the static {@link
+     * PipelineDefinition} (SD §7, T10). A step id with no matching tile — a {@code
+     * per_task_loop}-unrolled instance, since this canvas is built once from the static
+     * definition — has nothing to overlay onto and is skipped; see the T10 plan's known
+     * limitations.
+     */
+    public void applyRunSnapshot(RunSnapshot snapshot) {
+        snapshot.steps().forEach(stepSnapshot -> {
+            StepTileView tile = tilesById.get(stepSnapshot.stepId());
+            if (tile != null) {
+                tile.applyRunStatus(Optional.of(stepSnapshot));
+            }
+        });
     }
 
     public void resetView() {

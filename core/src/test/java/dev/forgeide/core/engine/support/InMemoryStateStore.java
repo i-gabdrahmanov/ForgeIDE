@@ -5,22 +5,25 @@ import dev.forgeide.core.port.StateStore;
 import dev.forgeide.core.run.RunId;
 import dev.forgeide.core.run.RunSnapshot;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Trivial in-memory {@link StateStore} fixture for engine tests (T06 does not exercise real
- * persistence — that is T07). {@link #history()} keeps every snapshot ever saved so a test can
- * assert on the granular sequence of transitions, not just the latest one.
+ * Trivial in-memory {@link StateStore} fixture for engine tests. {@link #history()} keeps every
+ * snapshot ever saved so a test can assert on the granular sequence of transitions, not just the
+ * latest one; {@link #audit()} does the same for appended audit events (T10 adds real audit
+ * emission to {@code PipelineEngine} — this fixture now actually records it instead of no-oping).
  */
 public final class InMemoryStateStore implements StateStore {
 
     private final Map<RunId, RunSnapshot> latest = new ConcurrentHashMap<>();
     private final List<RunSnapshot> history = new CopyOnWriteArrayList<>();
+    private final List<AuditEvent> audit = new CopyOnWriteArrayList<>();
+    private final Map<RunId, AtomicLong> auditSeqs = new ConcurrentHashMap<>();
 
     @Override
     public void save(RunSnapshot snapshot) {
@@ -43,16 +46,24 @@ public final class InMemoryStateStore implements StateStore {
     }
 
     @Override
-    public void appendAudit(AuditEvent event) {
-        // Audit hash-chain persistence is T07 scope; unused by the T06 engine.
+    public long appendAudit(AuditEvent event) {
+        long seq = auditSeqs.computeIfAbsent(event.runId(), id -> new AtomicLong()).incrementAndGet();
+        audit.add(new AuditEvent(seq, event.ts(), event.runId(), event.stepId(), event.iteration(),
+                event.type(), event.payload(), event.prevHash(), event.hash()));
+        return seq;
     }
 
     @Override
     public List<AuditEvent> loadAudit(RunId runId) {
-        return new ArrayList<>();
+        return audit.stream().filter(e -> e.runId().equals(runId)).toList();
     }
 
     public List<RunSnapshot> history() {
         return List.copyOf(history);
+    }
+
+    /** Every audit event appended across every run, in append order. */
+    public List<AuditEvent> audit() {
+        return List.copyOf(audit);
     }
 }

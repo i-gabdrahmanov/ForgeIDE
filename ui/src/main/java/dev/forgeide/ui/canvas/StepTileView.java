@@ -3,6 +3,8 @@ package dev.forgeide.ui.canvas;
 import dev.forgeide.core.pipeline.StepDefinition;
 import dev.forgeide.core.pipeline.TileValidity;
 import dev.forgeide.core.pipeline.validation.PipelineError;
+import dev.forgeide.core.run.StepSnapshot;
+import dev.forgeide.core.run.StepStatus;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.control.Label;
@@ -14,6 +16,7 @@ import javafx.scene.shape.Circle;
 import javafx.scene.text.TextAlignment;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.function.Consumer;
 
 /**
@@ -24,7 +27,13 @@ import java.util.function.Consumer;
  */
 public final class StepTileView extends StackPane {
 
+    private static final List<String> STATUS_STYLE_CLASSES = List.of(
+            "status-pending", "status-ready", "status-running", "status-passed",
+            "status-failed", "status-waiting-gate", "status-waiting-input", "status-skipped");
+
     private final StepDefinition step;
+    private Label iterationBadge;
+    private Label questionsBadge;
 
     public StepTileView(StepDefinition step, List<PipelineError> errors, TileValidity validity,
                          Consumer<StepDefinition> onSelect) {
@@ -64,6 +73,65 @@ public final class StepTileView extends StackPane {
 
     public StepDefinition step() {
         return step;
+    }
+
+    /**
+     * Overlays a run's live status onto this static tile (SD §7, T10: "оверлей статусов на
+     * канвасе — цвет/бейдж по RunSnapshot, включая счётчик итераций, бейдж «N вопросов» для
+     * WAITING_INPUT"). Style-class swap + label-text mutation only — never rebuilds the tile —
+     * so repeated calls on every engine event stay well under NFR-2's 200ms budget.
+     */
+    public void applyRunStatus(Optional<StepSnapshot> snapshot) {
+        getStyleClass().removeAll(STATUS_STYLE_CLASSES);
+        if (snapshot.isEmpty()) {
+            setIterationBadge(0);
+            setQuestionsBadge(0);
+            return;
+        }
+        StepSnapshot s = snapshot.get();
+        getStyleClass().add(statusStyleClass(s.status()));
+        setIterationBadge(s.iteration());
+        setQuestionsBadge(s.status() == StepStatus.WAITING_INPUT ? s.pendingQuestions().size() : 0);
+    }
+
+    private static String statusStyleClass(StepStatus status) {
+        return "status-" + status.name().toLowerCase().replace('_', '-');
+    }
+
+    private void setIterationBadge(int iteration) {
+        if (iteration <= 0) {
+            if (iterationBadge != null) {
+                iterationBadge.setVisible(false);
+            }
+            return;
+        }
+        if (iterationBadge == null) {
+            iterationBadge = new Label();
+            iterationBadge.getStyleClass().add("iteration-badge");
+            StackPane.setAlignment(iterationBadge, Pos.BOTTOM_LEFT);
+            StackPane.setMargin(iterationBadge, new Insets(0, 0, 6, 6));
+            getChildren().add(iterationBadge);
+        }
+        iterationBadge.setText("#" + iteration);
+        iterationBadge.setVisible(true);
+    }
+
+    private void setQuestionsBadge(int questionCount) {
+        if (questionCount <= 0) {
+            if (questionsBadge != null) {
+                questionsBadge.setVisible(false);
+            }
+            return;
+        }
+        if (questionsBadge == null) {
+            questionsBadge = new Label();
+            questionsBadge.getStyleClass().add("questions-badge");
+            StackPane.setAlignment(questionsBadge, Pos.TOP_LEFT);
+            StackPane.setMargin(questionsBadge, new Insets(4, 0, 0, 4));
+            getChildren().add(questionsBadge);
+        }
+        questionsBadge.setText(questionCount + (questionCount == 1 ? " question" : " questions"));
+        questionsBadge.setVisible(true);
     }
 
     private static VBox body(StepDefinition step) {

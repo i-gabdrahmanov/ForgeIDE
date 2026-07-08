@@ -1,8 +1,5 @@
 package dev.forgeide.runtime.process;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.core.JsonProcessingException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -42,8 +39,6 @@ public final class ProcessRunner {
     public static final long DEFAULT_MAX_OUTPUT_BYTES = 512L * 1024 * 1024;
 
     private static final Logger log = LoggerFactory.getLogger(ProcessRunner.class);
-
-    private final ObjectMapper mapper = new ObjectMapper();
 
     /**
      * Runs {@code spec} to completion: writes/closes stdin, drains stdout/stderr on their own
@@ -210,18 +205,7 @@ public final class ProcessRunner {
     }
 
     private ParsedLine parseLine(String line) {
-        if (line.isBlank()) {
-            return new ParsedLine.Raw(line);
-        }
-        try {
-            JsonNode node = mapper.readTree(line);
-            if (node == null) {
-                return new ParsedLine.Raw(line);
-            }
-            return new ParsedLine.Json(node);
-        } catch (JsonProcessingException notJson) {
-            return new ParsedLine.Raw(line);
-        }
+        return LineClassifier.classify(line);
     }
 
     private static boolean awaitWithinTimeout(Process process, Duration timeout) {
