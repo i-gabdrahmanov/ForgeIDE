@@ -64,6 +64,22 @@ public final class PipelineRun {
         return List.copyOf(steps.values());
     }
 
+    public boolean hasStep(String stepId) {
+        return steps.containsKey(stepId);
+    }
+
+    /**
+     * Grows the run with a step unrolled at runtime by a {@code per_task_loop} (T06):
+     * the fixed id list passed to the constructor is the base graph, this is the one
+     * legal way to extend it after the fact.
+     */
+    public void addStep(String stepId) {
+        Objects.requireNonNull(stepId, "stepId");
+        if (steps.putIfAbsent(stepId, new StepRun(stepId)) != null) {
+            throw new IllegalArgumentException("duplicate step id: " + stepId);
+        }
+    }
+
     public void complete() {
         this.status = RunStatus.COMPLETED;
         this.haltReason = null;
