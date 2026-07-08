@@ -189,6 +189,53 @@ class PipelineYamlTest {
         assertThat(def.step("a")).isInstanceOf(AgentStep.class);
     }
 
+    // ---- lenient parsing (T05 canvas) --------------------------------------------------
+
+    @Test
+    void lenientParseOfValidYamlHasNoErrors() {
+        PipelineYaml.ParseResult result = yaml.parseLenient(PipelineTemplates.forgeliteYaml());
+
+        assertThat(result.isValid()).isTrue();
+        assertThat(result.definition()).isPresent();
+        assertThat(result.errors()).isEmpty();
+    }
+
+    @Test
+    void lenientParseOfValidatorLevelErrorStillReturnsTheModel() {
+        String source = read("/pipelines/invalid/cycle.yaml");
+
+        PipelineYaml.ParseResult result = yaml.parseLenient(source);
+
+        assertThat(result.isValid()).isFalse();
+        assertThat(result.definition()).isPresent();
+        assertThat(result.definition().get().steps()).extracting(s -> s.id()).containsExactly("a", "b");
+        assertThat(result.errors()).anySatisfy(e -> {
+            assertThat(e.stepId()).isEqualTo("a");
+            assertThat(e.field()).isEqualTo("depends_on");
+            assertThat(e.message()).contains("cycle");
+        });
+    }
+
+    @Test
+    void lenientParseOfStructuralErrorHasNoModel() {
+        String source = read("/pipelines/invalid/missing-prompt.yaml");
+
+        PipelineYaml.ParseResult result = yaml.parseLenient(source);
+
+        assertThat(result.isValid()).isFalse();
+        assertThat(result.definition()).isEmpty();
+        assertThat(result.errors()).anySatisfy(e -> assertThat(e.field()).isEqualTo("prompt"));
+    }
+
+    @Test
+    void lenientParseOfMalformedYamlHasNoModel() {
+        PipelineYaml.ParseResult result = yaml.parseLenient("id: [unterminated");
+
+        assertThat(result.isValid()).isFalse();
+        assertThat(result.definition()).isEmpty();
+        assertThat(result.errors()).anySatisfy(e -> assertThat(e.message()).contains("malformed YAML"));
+    }
+
     private static String read(String resource) {
         try (InputStream in = PipelineYamlTest.class.getResourceAsStream(resource)) {
             if (in == null) {

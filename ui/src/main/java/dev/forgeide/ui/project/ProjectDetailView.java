@@ -31,12 +31,14 @@ import java.util.Optional;
 public final class ProjectDetailView extends BorderPane {
 
     public ProjectDetailView(ProjectDefinition project, RuntimeAvailabilityChecker checker,
-                              Runnable onEdit, Runnable onBack) {
+                              Runnable onEdit, Runnable onBack, Runnable onOpenCanvas) {
         Button back = new Button("← Projects");
         back.setOnAction(e -> onBack.run());
         Button edit = new Button("Edit");
         edit.setOnAction(e -> onEdit.run());
-        HBox header = new HBox(12, back, edit);
+        Button openCanvas = new Button("Open canvas");
+        openCanvas.setOnAction(e -> onOpenCanvas.run());
+        HBox header = new HBox(12, back, edit, openCanvas);
         header.setPadding(new Insets(12));
         setTop(header);
 
