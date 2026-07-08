@@ -1,6 +1,7 @@
 package dev.forgeide.core.engine;
 
 import dev.forgeide.core.pipeline.StepDefinition;
+import dev.forgeide.core.project.ProjectDefinition;
 import dev.forgeide.core.run.PipelineRun;
 import dev.forgeide.core.vars.VariableResolver;
 
@@ -18,6 +19,9 @@ import java.util.Map;
 final class RunContext {
 
     final PipelineRun run;
+    /** Kept (not just {@code repositoryPath}) so dispatch can resolve a step's {@code
+     * runtime:} ref to the project's configured {@link dev.forgeide.core.project.RuntimeBinding} (T09). */
+    final ProjectDefinition project;
     final Path projectRoot;
     final VariableResolver resolver;
 
@@ -39,10 +43,11 @@ final class RunContext {
     /** Step id -> the most recent {@code pending_questions} answers, folded into its next re-run. */
     final Map<String, Map<String, String>> lastAnswers = new HashMap<>();
 
-    RunContext(PipelineRun run, Path projectRoot, VariableResolver resolver,
+    RunContext(PipelineRun run, ProjectDefinition project, VariableResolver resolver,
                Map<String, StepDefinition> stepDefs, Map<String, String> promptSnapshots) {
         this.run = run;
-        this.projectRoot = projectRoot;
+        this.project = project;
+        this.projectRoot = project.repositoryPath();
         this.resolver = resolver;
         this.stepDefs = stepDefs;
         this.promptSnapshots = promptSnapshots;

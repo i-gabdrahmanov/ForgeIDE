@@ -244,6 +244,82 @@ class PipelineEngineTransitionsTest {
         }
     }
 
+    @Test
+    void tokenBudgetExceededFailsStepWithBudgetReason(@TempDir Path repo) throws IOException {
+        Path promptDir = repo.resolve("prompts");
+        Files.createDirectories(promptDir);
+        Files.writeString(promptDir.resolve("work.md"), "Do the thing");
+
+        AgentStep agent = new AgentStep("work", List.of(), "claude", Path.of("prompts/work.md"),
+                List.of(), List.of(), List.of(), RetryPolicy.DEFAULT, BUDGET);
+        PipelineDefinition definition = new PipelineDefinition("p", 1, List.of(agent));
+
+        ObjectMapper mapper = new ObjectMapper();
+        FixtureAgentRuntimePort agentRuntime = new FixtureAgentRuntimePort(inv -> {
+            ObjectNode json = mapper.createObjectNode();
+            json.put("step_id", "work");
+            // BUDGET.tokens() == 1_000; report usage over that even though a result is present.
+            return new AgentResult(0, Optional.of(json), new TokenUsage(800, 800), Path.of("raw.log"));
+        });
+
+        try (PipelineEngine engine = engine(FixtureScriptRunnerPort.alwaysOk(), agentRuntime)) {
+            RunId runId = engine.start(TestProjects.minimal(repo), definition, "feature-x");
+
+            until(() -> engine.snapshot(runId).map(s -> statusOf(s, "work") == StepStatus.FAILED).orElse(false));
+            RunSnapshot snapshot = engine.snapshot(runId).orElseThrow();
+            assertThat(snapshot.steps().stream().filter(s -> s.stepId().equals("work")).findFirst().orElseThrow()
+                    .failureReason()).contains(FailureReason.BUDGET);
+        }
+    }
+
+    @Test
+    void missingExpectedArtifactFailsStepWithArtifactsReason(@TempDir Path repo) throws IOException {
+        Path promptDir = repo.resolve("prompts");
+        Files.createDirectories(promptDir);
+        Files.writeString(promptDir.resolve("work.md"), "Do the thing");
+
+        AgentStep agent = new AgentStep("work", List.of(), "claude", Path.of("prompts/work.md"),
+                List.of(Path.of("out/report.md")), List.of(), List.of(), RetryPolicy.DEFAULT, BUDGET);
+        PipelineDefinition definition = new PipelineDefinition("p", 1, List.of(agent));
+
+        ObjectMapper mapper = new ObjectMapper();
+        FixtureAgentRuntimePort agentRuntime = new FixtureAgentRuntimePort(inv -> {
+            ObjectNode json = mapper.createObjectNode();
+            json.put("step_id", "work");
+            return new AgentResult(0, Optional.of(json), new TokenUsage(1, 1), Path.of("raw.log"));
+        });
+
+        try (PipelineEngine engine = engine(FixtureScriptRunnerPort.alwaysOk(), agentRuntime)) {
+            RunId runId = engine.start(TestProjects.minimal(repo), definition, "feature-x");
+
+            until(() -> engine.snapshot(runId).map(s -> statusOf(s, "work") == StepStatus.FAILED).orElse(false));
+            RunSnapshot snapshot = engine.snapshot(runId).orElseThrow();
+            assertThat(snapshot.steps().stream().filter(s -> s.stepId().equals("work")).findFirst().orElseThrow()
+                    .failureReason()).contains(FailureReason.ARTIFACTS);
+        }
+    }
+
+    @Test
+    void unknownRuntimeRefHaltsTheRunAsAnEngineError(@TempDir Path repo) throws IOException {
+        Path promptDir = repo.resolve("prompts");
+        Files.createDirectories(promptDir);
+        Files.writeString(promptDir.resolve("work.md"), "Do the thing");
+
+        AgentStep agent = new AgentStep("work", List.of(), "not-a-configured-runtime", Path.of("prompts/work.md"),
+                List.of(), List.of(), List.of(), RetryPolicy.DEFAULT, BUDGET);
+        PipelineDefinition definition = new PipelineDefinition("p", 1, List.of(agent));
+
+        try (PipelineEngine engine = engine(FixtureScriptRunnerPort.alwaysOk(), throwingAgent())) {
+            RunId runId = engine.start(TestProjects.minimal(repo), definition, "feature-x");
+
+            until(() -> engine.snapshot(runId).map(s -> s.status() == dev.forgeide.core.run.RunStatus.PAUSED)
+                    .orElse(false));
+            RunSnapshot snapshot = engine.snapshot(runId).orElseThrow();
+            assertThat(snapshot.haltReason()).contains(dev.forgeide.core.run.RunHaltReason.ENGINE_ERROR);
+            assertThat(statusOf(snapshot, "work")).isEqualTo(StepStatus.READY);
+        }
+    }
+
     private static PipelineEngine engine(FixtureScriptRunnerPort scriptRunner, FixtureAgentRuntimePort agentRuntime) {
         return new PipelineEngine(new InMemoryStateStore(), agentRuntime, scriptRunner);
     }

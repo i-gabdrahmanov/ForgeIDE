@@ -165,6 +165,24 @@ class ProcessRunnerTest {
         assertThat(bytesPerSecond).isGreaterThanOrEqualTo(10.0 * 1024 * 1024);
     }
 
+    @Test
+    @Timeout(value = 15, unit = TimeUnit.SECONDS)
+    void consumerThrowingProcessKillSignalKillsTheProcessGroupImmediately(@TempDir Path dir) {
+        ProcessSpec spec = spec(dir, List.of("/bin/sh", "-c", "echo one; sleep 30; echo two"),
+                Duration.ofSeconds(30), ProcessRunner.DEFAULT_MAX_OUTPUT_BYTES);
+        List<ParsedLine> lines = new CopyOnWriteArrayList<>();
+
+        ProcessOutcome outcome = runner.run(spec, line -> {
+            lines.add(line);
+            throw new ProcessKillSignal("budget exceeded");
+        }, l -> { });
+
+        assertThat(outcome.timedOut()).isFalse();
+        assertThat(outcome.exitCode()).isNotZero();
+        assertThat(outcome.wallClock()).isLessThan(Duration.ofSeconds(10));
+        assertThat(lines).hasSize(1);
+    }
+
     private static String rawText(ParsedLine line) {
         if (line instanceof ParsedLine.Raw raw) {
             return raw.line();
