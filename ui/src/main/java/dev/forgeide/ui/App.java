@@ -1,17 +1,19 @@
 package dev.forgeide.ui;
 
+import dev.forgeide.core.project.json.ProjectRegistry;
+import dev.forgeide.runtime.project.ProcessRuntimeAvailabilityChecker;
+import dev.forgeide.ui.project.ProjectsController;
 import javafx.application.Application;
 import javafx.scene.Scene;
-import javafx.scene.control.Label;
-import javafx.scene.layout.StackPane;
 import javafx.stage.Stage;
 
 public class App extends Application {
 
     @Override
     public void start(Stage primaryStage) {
-        var root = new StackPane(new Label("ForgeIDE"));
-        var scene = new Scene(root, 800, 600);
+        ProjectsController controller = new ProjectsController(new ProjectRegistry(),
+                new ProcessRuntimeAvailabilityChecker());
+        var scene = new Scene(controller.root(), 900, 640);
 
         primaryStage.setTitle("ForgeIDE");
         primaryStage.setScene(scene);
