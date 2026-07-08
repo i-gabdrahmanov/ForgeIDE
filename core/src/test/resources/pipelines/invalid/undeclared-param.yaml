@@ -1,0 +1,9 @@
+version: 1
+id: up
+steps:
+  - id: a
+    type: agent
+    runtime: gigacode
+    prompt: prompts/a.md
+    expects:
+      - out/${params.missing}.json

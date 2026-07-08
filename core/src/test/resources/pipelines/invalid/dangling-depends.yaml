@@ -1,0 +1,12 @@
+version: 1
+id: dang
+steps:
+  - id: a
+    type: agent
+    runtime: gigacode
+    prompt: prompts/a.md
+  - id: b
+    type: agent
+    runtime: gigacode
+    prompt: prompts/b.md
+    depends_on: [ghost]

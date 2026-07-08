@@ -1,0 +1,12 @@
+version: 1
+id: onj
+steps:
+  - id: g
+    type: gate
+    question: "Deliver?"
+    options: [approve, reject]
+  - id: d
+    type: outward
+    depends_on: [g]
+    actions: [git_push]
+    env_scope: [GIT_TOKEN]

@@ -1,0 +1,56 @@
+# Exercises the step types the forgelite template does not: script, branch,
+# per_task_loop, and a judge with an llm sub-verdict.
+version: 2
+id: extras
+steps:
+  - id: build
+    type: script
+    command: [gradle, build]
+    timeout: 15m
+
+  - id: work
+    type: agent
+    runtime: claude
+    depends_on: [build]
+    prompt: prompts/work.md
+    budget: {tokens: 1_000_000, wall_clock: 10m, output_mb: 128}
+
+  - id: review
+    type: judge
+    target: work
+    check:
+      command: [python3, check.py]
+      timeout: 3m
+    llm:
+      runtime: claude
+      prompt: prompts/review-judge.md
+      budget: {tokens: 500_000, wall_clock: 5m, output_mb: 64}
+    fail_policy: {max_iterations: 2}
+
+  - id: gate-ship
+    type: gate
+    depends_on: [review]
+    question: "Ship it?"
+    options: [approve, reject]
+
+  - id: route
+    type: branch
+    depends_on: [gate-ship]
+    routes: {approve: ship, reject: work}
+
+  - id: ship
+    type: outward
+    depends_on: [route, review]
+    actions: [git_push, create_pr, jira_comment]
+    env_scope: [GIT_TOKEN, JIRA_TOKEN]
+
+  - id: fanout
+    type: per_task_loop
+    depends_on: [review]
+    task_plan: task-plan.json
+    template:
+      - id: sub-impl
+        type: agent
+        runtime: claude
+        prompt: prompts/sub.md
+        budget: {tokens: 1_000_000, wall_clock: 10m, output_mb: 128}

@@ -1,0 +1,11 @@
+version: 1
+id: br
+steps:
+  - id: g
+    type: gate
+    question: "Proceed?"
+    options: [approve, reject]
+  - id: r
+    type: branch
+    depends_on: [g]
+    routes: {approve: ghost, reject: g}

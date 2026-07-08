@@ -1,0 +1,6 @@
+version: 1
+id: mp
+steps:
+  - id: a
+    type: agent
+    runtime: gigacode

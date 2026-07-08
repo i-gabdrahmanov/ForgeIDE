@@ -1,0 +1,9 @@
+version: 1
+id: dup
+steps:
+  - id: a
+    type: script
+    command: [echo, one]
+  - id: a
+    type: script
+    command: [echo, two]
