@@ -17,12 +17,15 @@ import java.util.function.Consumer;
 /** Screen listing registered projects (SDD FR-1.1, T04 acceptance: open a project). */
 public final class ProjectListView extends BorderPane {
 
-    public ProjectListView(List<ProjectDefinition> projects, Consumer<ProjectDefinition> onOpen, Runnable onCreate) {
+    public ProjectListView(List<ProjectDefinition> projects, Consumer<ProjectDefinition> onOpen, Runnable onCreate,
+                            Runnable onViewForgeliteTemplate) {
         Label title = new Label("Projects");
         title.setStyle("-fx-font-size: 18px; -fx-font-weight: bold;");
         Button newProject = new Button("New project");
         newProject.setOnAction(e -> onCreate.run());
-        HBox header = new HBox(12, title, newProject);
+        Button viewTemplate = new Button("View forgelite template");
+        viewTemplate.setOnAction(e -> onViewForgeliteTemplate.run());
+        HBox header = new HBox(12, title, newProject, viewTemplate);
         header.setAlignment(Pos.CENTER_LEFT);
         header.setPadding(new Insets(12));
         setTop(header);
