@@ -25,15 +25,19 @@ import java.util.List;
  * <p>Lines that match neither shape (system/init events, user/tool-result echoes) are not
  * surfaced as events — {@link dev.forgeide.runtime.process.ProcessRunner} already tees every
  * raw line to disk regardless.
+ *
+ * <p>Public (not just package-private) so the UI's log tailer (T10) can reuse the same mapping
+ * for the "parsed events" tab when reading a finished or in-flight {@code stdout.jsonl} back
+ * off disk, instead of re-implementing this shape-matching a second time.
  */
-final class StreamJsonEvents {
+public final class StreamJsonEvents {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private StreamJsonEvents() {
     }
 
-    static List<AgentEvent> parse(ParsedLine line) {
+    public static List<AgentEvent> parse(ParsedLine line) {
         if (line instanceof ParsedLine.Raw raw) {
             return List.of(new AgentEvent.RawLine(raw.line()));
         }

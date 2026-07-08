@@ -21,7 +21,8 @@ public interface StateStore {
 
     List<RunId> listRuns(String featureSlug);
 
-    void appendAudit(AuditEvent event);
+    /** Returns the seq assigned by the store's chain tip (the caller's {@code event.seq()} is ignored). */
+    long appendAudit(AuditEvent event);
 
     List<AuditEvent> loadAudit(RunId runId);
 }

@@ -34,6 +34,34 @@
 .validity-stale   { -fx-fill: #f9ab00; }
 .validity-unknown { -fx-fill: #9aa0a6; }
 
+/* Run-view status overlay (T10, SD §7): border ring on top of the type-based fill/border above. */
+.status-running       { -fx-border-color: #1a73e8; -fx-border-width: 3; }
+.status-passed        { -fx-border-color: #34a853; -fx-border-width: 3; }
+.status-failed        { -fx-border-color: #d93025; -fx-border-width: 3; }
+.status-waiting-gate  { -fx-border-color: #a142f4; -fx-border-width: 3; -fx-border-style: dashed; }
+.status-waiting-input { -fx-border-color: #f9ab00; -fx-border-width: 3; -fx-border-style: dashed; }
+.status-skipped       { -fx-border-color: #9aa0a6; -fx-border-width: 1.5; -fx-opacity: 0.55; }
+.status-pending       { -fx-opacity: 0.75; }
+.status-ready         { -fx-border-color: #5f6368; -fx-border-width: 2; }
+
+.iteration-badge {
+    -fx-background-color: #202124;
+    -fx-background-radius: 8;
+    -fx-text-fill: white;
+    -fx-font-size: 9px;
+    -fx-font-weight: bold;
+    -fx-padding: 1 5 1 5;
+}
+
+.questions-badge {
+    -fx-background-color: #f9ab00;
+    -fx-background-radius: 8;
+    -fx-text-fill: white;
+    -fx-font-size: 9px;
+    -fx-font-weight: bold;
+    -fx-padding: 1 5 1 5;
+}
+
 .edge-depends { -fx-stroke: #5f6368; -fx-fill: transparent; -fx-stroke-width: 1.6; }
 .edge-branch  { -fx-stroke: #a142f4; -fx-fill: transparent; -fx-stroke-width: 1.4; -fx-stroke-dash-array: 6 4; }
 .edge-label   { -fx-font-size: 9px; -fx-fill: #555555; }

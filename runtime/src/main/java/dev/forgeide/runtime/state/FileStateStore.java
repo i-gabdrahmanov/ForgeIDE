@@ -124,7 +124,7 @@ public final class FileStateStore implements StateStore {
     }
 
     @Override
-    public void appendAudit(AuditEvent event) {
+    public long appendAudit(AuditEvent event) {
         Path dir = resolveRunDir(event.runId());
         if (dir == null) {
             throw new IllegalStateException("no run directory for " + event.runId()
@@ -147,6 +147,7 @@ public final class FileStateStore implements StateStore {
                 throw new UncheckedIOException("cannot append audit event: " + event.runId(), e);
             }
             chainTips.put(event.runId(), new ChainTip(seq, hash));
+            return seq;
         }
     }
 

@@ -2,6 +2,9 @@ package dev.forgeide.core.engine;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import dev.forgeide.core.audit.AuditEvent;
 import dev.forgeide.core.event.EngineCommand;
 import dev.forgeide.core.event.EngineEvent;
 import dev.forgeide.core.pipeline.AgentStep;
@@ -24,12 +27,14 @@ import dev.forgeide.core.port.ScriptRunnerPort;
 import dev.forgeide.core.port.StateStore;
 import dev.forgeide.core.project.ProjectDefinition;
 import dev.forgeide.core.project.RuntimeBinding;
+import dev.forgeide.core.run.AuditRef;
 import dev.forgeide.core.run.FailureReason;
 import dev.forgeide.core.run.JudgeVerdict;
 import dev.forgeide.core.run.PendingQuestion;
 import dev.forgeide.core.run.PipelineRun;
 import dev.forgeide.core.run.RunHaltReason;
 import dev.forgeide.core.run.RunId;
+import dev.forgeide.core.run.RunLogLayout;
 import dev.forgeide.core.run.RunSnapshot;
 import dev.forgeide.core.run.RunStatus;
 import dev.forgeide.core.run.StepRun;
@@ -43,6 +48,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -128,6 +134,11 @@ public final class PipelineEngine implements AutoCloseable {
         listeners.add(Objects.requireNonNull(listener, "listener"));
     }
 
+    /** Removes a listener registered via {@link #subscribe} (e.g. when a UI view is disposed). */
+    public void unsubscribe(Consumer<EngineEvent> listener) {
+        listeners.remove(listener);
+    }
+
     /** Last snapshot published for {@code runId}, if any — safe to call from any thread. */
     public Optional<RunSnapshot> snapshot(RunId runId) {
         return Optional.ofNullable(latestSnapshots.get(runId));
@@ -204,14 +215,37 @@ public final class PipelineEngine implements AutoCloseable {
             RunContext ctx = new RunContext(run, project, resolver, stepDefs, promptSnapshots);
             runs.put(runId, ctx);
             persistAndPublish(ctx);
+            // appendAudit needs the run directory that the persistAndPublish above just created
+            // (FileStateStore.save creates it) — this is the one call site where audit() runs
+            // after, not before, its persistAndPublish.
+            audit(ctx, null, 0, "run.started", runStartedPayload(featureSlug, definition, topLevelIds));
             advance(ctx);
         } catch (RuntimeException ex) {
             log.error("failed to start run {} for feature {}", runId, featureSlug, ex);
             run.pause(RunHaltReason.ENGINE_ERROR);
-            runs.put(runId, new RunContext(run, project, MapVariableResolver.builder().build(),
-                    stepDefs, Map.of()));
-            persistAndPublish(runs.get(runId));
+            RunContext failedCtx = new RunContext(run, project, MapVariableResolver.builder().build(),
+                    stepDefs, Map.of());
+            runs.put(runId, failedCtx);
+            persistAndPublish(failedCtx);
+            audit(failedCtx, null, 0, "run.paused",
+                    haltPayload(RunHaltReason.ENGINE_ERROR.name(), String.valueOf(ex.getMessage())));
         }
+    }
+
+    private static ObjectNode runStartedPayload(String featureSlug, PipelineDefinition definition, List<String> stepIds) {
+        ObjectNode payload = MAPPER.createObjectNode();
+        payload.put("featureSlug", featureSlug);
+        payload.put("pipelineId", definition.id());
+        ArrayNode ids = payload.putArray("stepIds");
+        stepIds.forEach(ids::add);
+        return payload;
+    }
+
+    private static ObjectNode haltPayload(String reason, String detail) {
+        ObjectNode payload = MAPPER.createObjectNode();
+        payload.put("reason", reason);
+        payload.put("detail", detail);
+        return payload;
     }
 
     private static String readPromptFile(Path root, Path relative) {
@@ -255,13 +289,27 @@ public final class PipelineEngine implements AutoCloseable {
             handleJudgeOutcome(ctx, judge, sr, true, "");
         } else if (!cmd.pendingQuestions().isEmpty()) {
             sr.awaitInput(cmd.pendingQuestions());
+            audit(ctx, cmd.stepId(), cmd.iteration(), "questions.asked", questionsAskedPayload(cmd.pendingQuestions()));
             persistAndPublish(ctx);
             publish(new EngineEvent.QuestionsPending(ctx.run.id(), cmd.stepId(), cmd.pendingQuestions()));
         } else {
             sr.transitionTo(StepStatus.PASSED);
+            audit(ctx, cmd.stepId(), cmd.iteration(), "step.completed", MAPPER.createObjectNode());
             persistAndPublish(ctx);
         }
         advance(ctx);
+    }
+
+    private static ObjectNode questionsAskedPayload(List<PendingQuestion> questions) {
+        ObjectNode payload = MAPPER.createObjectNode();
+        ArrayNode array = payload.putArray("questions");
+        for (PendingQuestion q : questions) {
+            ObjectNode qNode = array.addObject();
+            qNode.put("id", q.id());
+            qNode.put("text", q.text());
+            qNode.put("type", q.type().name());
+        }
+        return payload;
     }
 
     private void handleStepFailed(RunContext ctx, EngineCommand.StepFailed cmd) {
@@ -279,15 +327,24 @@ public final class PipelineEngine implements AutoCloseable {
             handleJudgeOutcome(ctx, judge, sr, false, cmd.detail());
         } else {
             sr.markFailed(cmd.reason());
+            audit(ctx, cmd.stepId(), cmd.iteration(), "step.failed", failedPayload(cmd.reason(), cmd.detail()));
             persistAndPublish(ctx);
         }
         advance(ctx);
+    }
+
+    private static ObjectNode failedPayload(FailureReason reason, String detail) {
+        ObjectNode payload = MAPPER.createObjectNode();
+        payload.put("reason", reason.name());
+        payload.put("detail", detail);
+        return payload;
     }
 
     private void handleJudgeOutcome(RunContext ctx, JudgeStep judge, StepRun judgeRun, boolean passed, String detail) {
         judgeRun.recordVerdict(new JudgeVerdict(judgeRun.iteration(), Optional.empty(), passed, detail));
         String targetId = judge.targetStepId();
         StepRun targetRun = ctx.run.step(targetId);
+        audit(ctx, judge.id(), judgeRun.iteration(), "judge.verdict", verdictPayload(targetId, passed, detail));
 
         if (passed) {
             ctx.accumulatedErrors.remove(targetId);
@@ -305,12 +362,31 @@ public final class PipelineEngine implements AutoCloseable {
             persistAndPublish(ctx);
         } else {
             judgeRun.transitionTo(StepStatus.WAITING_GATE);
+            String question = "Judge exhausted " + judge.failPolicy().maxIterations() + " iteration(s) for step '"
+                    + targetId + "'. Retry gives it one more attempt; cancel fails the judge.";
+            audit(ctx, judge.id(), judgeRun.iteration(), "gate.requested",
+                    gateRequestedPayload(question, List.of("retry", "cancel"), targetId));
             persistAndPublish(ctx);
-            publish(new EngineEvent.GateRequest(ctx.run.id(), judge.id(),
-                    "Judge exhausted " + judge.failPolicy().maxIterations() + " iteration(s) for step '"
-                            + targetId + "'. Retry gives it one more attempt; cancel fails the judge.",
+            publish(new EngineEvent.GateRequest(ctx.run.id(), judge.id(), question,
                     List.of("retry", "cancel"), List.of()));
         }
+    }
+
+    private static ObjectNode verdictPayload(String targetStepId, boolean passed, String detail) {
+        ObjectNode payload = MAPPER.createObjectNode();
+        payload.put("targetStepId", targetStepId);
+        payload.put("passed", passed);
+        payload.put("detail", detail);
+        return payload;
+    }
+
+    private static ObjectNode gateRequestedPayload(String question, List<String> options, String targetStepId) {
+        ObjectNode payload = MAPPER.createObjectNode();
+        payload.put("question", question);
+        ArrayNode array = payload.putArray("options");
+        options.forEach(array::add);
+        payload.put("targetStepId", targetStepId);
+        return payload;
     }
 
     private void handleGateAnswered(RunContext ctx, EngineCommand.GateAnswered cmd) {
@@ -332,10 +408,12 @@ public final class PipelineEngine implements AutoCloseable {
             }
             ctx.gateAnswers.put(cmd.stepId(), cmd.answer());
             sr.transitionTo(StepStatus.PASSED);
+            audit(ctx, cmd.stepId(), sr.iteration(), "gate.answered", gateAnsweredPayload(cmd));
             persistAndPublish(ctx);
         } else if (def instanceof JudgeStep judge) {
             switch (cmd.answer()) {
                 case "retry" -> {
+                    audit(ctx, cmd.stepId(), sr.iteration(), "gate.answered", gateAnsweredPayload(cmd));
                     StepRun targetRun = ctx.run.step(judge.targetStepId());
                     targetRun.transitionTo(StepStatus.READY);
                     persistAndPublish(ctx);
@@ -344,6 +422,7 @@ public final class PipelineEngine implements AutoCloseable {
                     persistAndPublish(ctx);
                 }
                 case "cancel" -> {
+                    audit(ctx, cmd.stepId(), sr.iteration(), "gate.answered", gateAnsweredPayload(cmd));
                     sr.markFailed(FailureReason.JUDGE);
                     persistAndPublish(ctx);
                 }
@@ -354,6 +433,14 @@ public final class PipelineEngine implements AutoCloseable {
             return;
         }
         advance(ctx);
+    }
+
+    private static ObjectNode gateAnsweredPayload(EngineCommand.GateAnswered cmd) {
+        ObjectNode payload = MAPPER.createObjectNode();
+        payload.put("answer", cmd.answer());
+        payload.put("user", cmd.user());
+        payload.put("at", cmd.at().toString());
+        return payload;
     }
 
     private void handleQuestionsAnswered(RunContext ctx, EngineCommand.QuestionsAnswered cmd) {
@@ -368,14 +455,23 @@ public final class PipelineEngine implements AutoCloseable {
         }
         ctx.lastAnswers.put(cmd.stepId(), cmd.answers());
         sr.transitionTo(StepStatus.READY);
+        audit(ctx, cmd.stepId(), sr.iteration(), "questions.answered", questionsAnsweredPayload(cmd));
         persistAndPublish(ctx);
         dispatch(ctx, ctx.stepDefs.get(cmd.stepId()));
         advance(ctx);
     }
 
+    private static ObjectNode questionsAnsweredPayload(EngineCommand.QuestionsAnswered cmd) {
+        ObjectNode payload = MAPPER.createObjectNode();
+        ObjectNode answers = payload.putObject("answers");
+        cmd.answers().forEach(answers::put);
+        return payload;
+    }
+
     private void handleCancelRun(RunContext ctx) {
         if (ctx.run.status() == RunStatus.RUNNING) {
             ctx.run.cancel();
+            audit(ctx, null, 0, "run.cancelled", MAPPER.createObjectNode());
             persistAndPublish(ctx);
         }
     }
@@ -390,6 +486,7 @@ public final class PipelineEngine implements AutoCloseable {
             return;
         }
         sr.transitionTo(StepStatus.READY);
+        audit(ctx, cmd.stepId(), sr.iteration(), "step.retried", MAPPER.createObjectNode());
         persistAndPublish(ctx);
         dispatch(ctx, ctx.stepDefs.get(cmd.stepId()));
         advance(ctx);
@@ -435,6 +532,7 @@ public final class PipelineEngine implements AutoCloseable {
                 .allMatch(s -> s.status() == StepStatus.PASSED || s.status() == StepStatus.SKIPPED);
         if (allDone) {
             ctx.run.complete();
+            audit(ctx, null, 0, "run.completed", MAPPER.createObjectNode());
             persistAndPublish(ctx);
         }
     }
@@ -457,6 +555,7 @@ public final class PipelineEngine implements AutoCloseable {
         StepRun sr = ctx.run.step(stepId);
         sr.transitionTo(StepStatus.RUNNING);
         sr.startIteration();
+        audit(ctx, stepId, sr.iteration(), "step.running", MAPPER.createObjectNode());
         persistAndPublish(ctx);
         return sr.iteration();
     }
@@ -532,8 +631,7 @@ public final class PipelineEngine implements AutoCloseable {
 
     /** {@code ground/ai-logs/<feature>/iter-NN/<step>/} (SD §6.2). */
     private static Path logDir(RunContext ctx, String stepId, int iteration) {
-        return ctx.projectRoot.resolve("ground").resolve("ai-logs")
-                .resolve(ctx.run.featureSlug()).resolve("iter-" + iteration).resolve(stepId);
+        return RunLogLayout.stepLogDir(ctx.projectRoot, ctx.run.featureSlug(), stepId, iteration);
     }
 
     private String appendContextBlocks(RunContext ctx, String stepId, String rendered) {
@@ -619,6 +717,7 @@ public final class PipelineEngine implements AutoCloseable {
     private void dispatchGate(RunContext ctx, GateStep gate) {
         StepRun sr = ctx.run.step(gate.id());
         sr.transitionTo(StepStatus.WAITING_GATE);
+        audit(ctx, gate.id(), sr.iteration(), "gate.requested", gateRequestedPayload(gate.question(), gate.options(), gate.id()));
         persistAndPublish(ctx);
         List<Path> artifacts = gate.showArtifacts().stream().map(ctx.projectRoot::resolve).toList();
         publish(new EngineEvent.GateRequest(ctx.run.id(), gate.id(), gate.question(), gate.options(), artifacts));
@@ -657,6 +756,8 @@ public final class PipelineEngine implements AutoCloseable {
     private void haltOnEngineError(RunContext ctx, String stepId, String detail) {
         log.error("run {} halted: {}", ctx.run.id(), detail);
         ctx.run.pause(RunHaltReason.ENGINE_ERROR);
+        audit(ctx, stepId, 0, "run.paused", haltPayload(RunHaltReason.ENGINE_ERROR.name(), detail));
+        audit(ctx, stepId, 0, "incident.raised", failedPayload(FailureReason.SCRIPT, detail));
         persistAndPublish(ctx);
         publish(new EngineEvent.IncidentRaised(ctx.run.id(), stepId, FailureReason.SCRIPT, detail));
     }
@@ -718,6 +819,25 @@ public final class PipelineEngine implements AutoCloseable {
             return "";
         }
         return text.length() > 500 ? text.substring(0, 500) : text;
+    }
+
+    // ---- audit (SD §4: "аудит пишет только движок") ----------------------------------------
+
+    /**
+     * Appends one hash-chain audit entry (T07's {@link StateStore#appendAudit}) and, for a
+     * step-scoped event, records a pointer to it on that step ({@link StepRun#recordEvent}) so
+     * it shows up in the published {@link dev.forgeide.core.run.StepSnapshot#events()}.
+     *
+     * <p>Call this immediately <em>before</em> the transition's own {@link #persistAndPublish}
+     * so the resulting {@link AuditRef} is present in the snapshot that gets persisted and
+     * published — {@link #bootstrap} is the one exception (see its call sites).
+     */
+    private void audit(RunContext ctx, String stepId, int iteration, String type, ObjectNode payload) {
+        AuditEvent envelope = new AuditEvent(0, Instant.now(), ctx.run.id(), stepId, iteration, type, payload, "", "");
+        long seq = stateStore.appendAudit(envelope);
+        if (stepId != null) {
+            ctx.run.step(stepId).recordEvent(new AuditRef(seq, type));
+        }
     }
 
     // ---- persistence + events ---------------------------------------------------------

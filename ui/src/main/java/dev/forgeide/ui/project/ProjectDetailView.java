@@ -31,14 +31,16 @@ import java.util.Optional;
 public final class ProjectDetailView extends BorderPane {
 
     public ProjectDetailView(ProjectDefinition project, RuntimeAvailabilityChecker checker,
-                              Runnable onEdit, Runnable onBack, Runnable onOpenCanvas) {
+                              Runnable onEdit, Runnable onBack, Runnable onOpenCanvas, Runnable onStartRun) {
         Button back = new Button("← Projects");
         back.setOnAction(e -> onBack.run());
         Button edit = new Button("Edit");
         edit.setOnAction(e -> onEdit.run());
         Button openCanvas = new Button("Open canvas");
         openCanvas.setOnAction(e -> onOpenCanvas.run());
-        HBox header = new HBox(12, back, edit, openCanvas);
+        Button startRun = new Button("Start run");
+        startRun.setOnAction(e -> onStartRun.run());
+        HBox header = new HBox(12, back, edit, openCanvas, startRun);
         header.setPadding(new Insets(12));
         setTop(header);
 
@@ -74,10 +76,12 @@ public final class ProjectDetailView extends BorderPane {
             Label status = new Label("checking…");
             box.getChildren().add(new HBox(8,
                     new Label(runtime.name() + "  (" + runtime.binaryPath() + ")"), status));
-            Platform.runLater(() -> {
+            Thread.ofVirtual().start(() -> {
                 RuntimeAvailability result = checker.check(runtime);
-                status.setText(result.status() + (result.detail().isBlank() ? "" : ": " + result.detail()));
-                status.setTextFill(result.status() == RuntimeStatus.AVAILABLE ? Color.SEAGREEN : Color.FIREBRICK);
+                Platform.runLater(() -> {
+                    status.setText(result.status() + (result.detail().isBlank() ? "" : ": " + result.detail()));
+                    status.setTextFill(result.status() == RuntimeStatus.AVAILABLE ? Color.SEAGREEN : Color.FIREBRICK);
+                });
             });
         }
         return box;
