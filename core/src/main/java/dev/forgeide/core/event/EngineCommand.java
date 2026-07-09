@@ -87,6 +87,18 @@ public sealed interface EngineCommand {
     }
 
     /**
+     * T19/SR-9/Т-9: pids the post-phase orphan sweep force-killed (a {@code nohup}/{@code setsid}
+     * escapee whose cwd sat under the project, still alive after the phase's own process group
+     * was killed) — informational only, same shape as {@link EvidenceObserved}: appends an {@code
+     * incident.orphan_process} audit entry and never drives a step-status transition.
+     */
+    record OrphanProcessesSwept(RunId runId, String stepId, int iteration, List<Long> pids) implements EngineCommand {
+        public OrphanProcessesSwept {
+            pids = List.copyOf(pids);
+        }
+    }
+
+    /**
      * T17: dispatch outcome for an {@code OutwardStep} — the branch it pushed (consulted by a
      * later outward step's stacked-PR base resolution, {@code PipelineEngine#stackedPrBase}) and
      * the external refs each action produced (PR URL, Jira comment id, …) for the audit trail /

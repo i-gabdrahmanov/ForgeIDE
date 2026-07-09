@@ -1,5 +1,6 @@
 package dev.forgeide.runtime.process;
 
+import dev.forgeide.core.port.ProcessSweepPort;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -33,7 +34,7 @@ import java.util.function.Consumer;
  * Everything about what the output <em>means</em> (stream-json shapes, artifact contracts,
  * success criteria) is the caller's job (T09) — see {@link ParsedLine}/{@link ProcessOutcome}.
  */
-public final class ProcessRunner {
+public final class ProcessRunner implements ProcessSweepPort {
 
     /** Default per-phase combined stdout+stderr byte cap (SD §6.1 item 5). */
     public static final long DEFAULT_MAX_OUTPUT_BYTES = 512L * 1024 * 1024;
@@ -107,6 +108,7 @@ public final class ProcessRunner {
      * the tracked group). Returns the pids it force-killed, for the caller to log as an
      * incident.
      */
+    @Override
     public List<Long> sweepOrphans(Path projectDir) {
         Path normalizedProject = realOrNormalized(projectDir);
         long selfPid = ProcessHandle.current().pid();
