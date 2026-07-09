@@ -34,6 +34,7 @@ import dev.forgeide.core.run.FailureReason;
 import dev.forgeide.core.run.JudgeVerdict;
 import dev.forgeide.core.run.PendingQuestion;
 import dev.forgeide.core.run.PipelineRun;
+import dev.forgeide.core.run.QuestionEscalationAction;
 import dev.forgeide.core.run.RunHaltReason;
 import dev.forgeide.core.run.RunId;
 import dev.forgeide.core.run.RunLogLayout;
@@ -82,6 +83,9 @@ public final class PipelineEngine implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(PipelineEngine.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    /** FR-10.5: at most this many {@code pending_questions} rounds per phase attempt before the
+     * round-limit escalation dialog takes over (Т-15: "изматывание человека вопросами"). */
+    private static final int QUESTION_ROUND_LIMIT = 2;
 
     private final StateStore stateStore;
     private final AgentRuntimePort agentRuntime;
@@ -348,7 +352,7 @@ public final class PipelineEngine implements AutoCloseable {
                         ctx.gateAnswers.put(stepId, answer.asText());
                     }
                 }
-                case "questions.answered" -> {
+                case "question.answered" -> {
                     JsonNode answers = event.payload().get("answers");
                     if (stepId != null && answers != null && answers.isObject()) {
                         Map<String, String> answerMap = new LinkedHashMap<>();
@@ -452,10 +456,15 @@ public final class PipelineEngine implements AutoCloseable {
         if (def instanceof JudgeStep judge) {
             handleJudgeOutcome(ctx, judge, sr, true, "");
         } else if (!cmd.pendingQuestions().isEmpty()) {
-            sr.awaitInput(cmd.pendingQuestions());
-            audit(ctx, cmd.stepId(), cmd.iteration(), "questions.asked", questionsAskedPayload(cmd.pendingQuestions()));
-            persistAndPublish(ctx);
-            publish(new EngineEvent.QuestionsPending(ctx.run.id(), cmd.stepId(), cmd.pendingQuestions()));
+            int round = ctx.questionRounds.merge(cmd.stepId(), 1, Integer::sum);
+            if (round > QUESTION_ROUND_LIMIT) {
+                escalateQuestionRounds(ctx, cmd.stepId(), sr, cmd.pendingQuestions());
+            } else {
+                sr.awaitInput(cmd.pendingQuestions());
+                audit(ctx, cmd.stepId(), cmd.iteration(), "question.asked", questionAskedPayload(cmd.pendingQuestions()));
+                persistAndPublish(ctx);
+                publish(new EngineEvent.QuestionsPending(ctx.run.id(), cmd.stepId(), cmd.pendingQuestions()));
+            }
         } else {
             sr.transitionTo(StepStatus.PASSED);
             ctx.autoRetryCounts.remove(cmd.stepId());
@@ -465,7 +474,7 @@ public final class PipelineEngine implements AutoCloseable {
         advance(ctx);
     }
 
-    private static ObjectNode questionsAskedPayload(List<PendingQuestion> questions) {
+    private static ObjectNode questionAskedPayload(List<PendingQuestion> questions) {
         ObjectNode payload = MAPPER.createObjectNode();
         ArrayNode array = payload.putArray("questions");
         for (PendingQuestion q : questions) {
@@ -473,8 +482,34 @@ public final class PipelineEngine implements AutoCloseable {
             qNode.put("id", q.id());
             qNode.put("text", q.text());
             qNode.put("type", q.type().name());
+            if (!q.options().isEmpty()) {
+                ArrayNode options = qNode.putArray("options");
+                q.options().forEach(options::add);
+            }
+            q.context().ifPresent(c -> qNode.put("context", c));
         }
         return payload;
+    }
+
+    /** FR-10.5 / Т-15: a 3rd round in the same phase attempt does not ask again — it hands the
+     * step to the shared T12 escalation dialog instead, exactly like a judge's exhausted
+     * {@code fail_policy} (FR-11.3's "shared infrastructure"), so a model cannot loop a human
+     * into exhaustion by endlessly asking one more question. */
+    private void escalateQuestionRounds(RunContext ctx, String stepId, StepRun sr, List<PendingQuestion> questions) {
+        ctx.questionEscalations.add(stepId);
+        sr.transitionTo(StepStatus.WAITING_GATE);
+        String question = "Step '" + stepId + "' asked a " + (QUESTION_ROUND_LIMIT + 1)
+                + "rd round of questions — the limit is " + QUESTION_ROUND_LIMIT
+                + " per attempt (FR-10.5). Choose how to proceed.";
+        List<String> options = Arrays.stream(QuestionEscalationAction.values())
+                .map(QuestionEscalationAction::token).toList();
+        ObjectNode payload = questionAskedPayload(questions);
+        ArrayNode optionsNode = payload.putArray("options");
+        options.forEach(optionsNode::add);
+        audit(ctx, stepId, sr.iteration(), "question.escalated", payload);
+        persistAndPublish(ctx);
+        List<String> history = List.copyOf(ctx.questionRoundHistory.getOrDefault(stepId, List.of()));
+        publish(new EngineEvent.GateRequest(ctx.run.id(), stepId, question, options, List.of(), RiskLevel.R1, history));
     }
 
     private void handleStepFailed(RunContext ctx, EngineCommand.StepFailed cmd) {
@@ -559,6 +594,7 @@ public final class PipelineEngine implements AutoCloseable {
         if (judgeRun.iteration() < judge.failPolicy().maxIterations()) {
             targetRun.transitionTo(StepStatus.READY);
             persistAndPublish(ctx);
+            resetQuestionRounds(ctx, targetId);
             dispatch(ctx, ctx.stepDefs.get(targetId));
             judgeRun.transitionTo(StepStatus.PENDING);
             persistAndPublish(ctx);
@@ -635,11 +671,39 @@ public final class PipelineEngine implements AutoCloseable {
             if (!handleEscalationAnswer(ctx, judge, sr, cmd)) {
                 return;
             }
+        } else if (ctx.questionEscalations.contains(cmd.stepId())) {
+            if (!handleQuestionEscalationAnswer(ctx, sr, cmd)) {
+                return;
+            }
         } else {
             log.warn("gate answered for a step that is neither a gate nor an escalated judge: {}", cmd.stepId());
             return;
         }
         advance(ctx);
+    }
+
+    /** FR-10.5 round-limit escalation resolution. {@code split_step}/{@code cancel} both end the
+     * phase attempt as {@code FAILED(questions)} (Т-15: "эскалация как FAIL") — a human can still
+     * manually retry, which resets the round budget; {@code open_prompt} never legitimately
+     * reaches here (see {@link QuestionEscalationAction}'s javadoc). */
+    private boolean handleQuestionEscalationAnswer(RunContext ctx, StepRun sr, EngineCommand.GateAnswered cmd) {
+        Optional<QuestionEscalationAction> action = QuestionEscalationAction.fromToken(cmd.answer());
+        if (action.isEmpty()) {
+            log.warn("unknown question-escalation answer '{}' for step {}", cmd.answer(), cmd.stepId());
+            return false;
+        }
+        if (action.get() == QuestionEscalationAction.OPEN_PROMPT) {
+            log.warn("open_prompt question-escalation answer reached the engine for step {} — "
+                    + "T20's prompt editor is out of scope, refusing", cmd.stepId());
+            return false;
+        }
+        audit(ctx, cmd.stepId(), sr.iteration(), "gate.answered", gateAnsweredPayload(cmd));
+        ctx.questionEscalations.remove(cmd.stepId());
+        ctx.questionRounds.remove(cmd.stepId());
+        ctx.questionRoundHistory.remove(cmd.stepId());
+        sr.markFailed(FailureReason.QUESTIONS);
+        persistAndPublish(ctx);
+        return true;
     }
 
     /**
@@ -707,6 +771,7 @@ public final class PipelineEngine implements AutoCloseable {
         StepRun targetRun = ctx.run.step(judge.targetStepId());
         targetRun.transitionTo(StepStatus.READY);
         persistAndPublish(ctx);
+        resetQuestionRounds(ctx, judge.targetStepId());
         dispatch(ctx, ctx.stepDefs.get(judge.targetStepId()));
         escalationRun.transitionTo(StepStatus.PENDING);
         persistAndPublish(ctx);
@@ -739,19 +804,33 @@ public final class PipelineEngine implements AutoCloseable {
             log.warn("questions answered for step {} not awaiting input (status {})", cmd.stepId(), sr.status());
             return;
         }
+        ctx.questionRoundHistory.computeIfAbsent(cmd.stepId(), k -> new ArrayList<>())
+                .add(questionRoundSummary(sr.pendingQuestions(), cmd.answers()));
         ctx.lastAnswers.put(cmd.stepId(), cmd.answers());
         sr.transitionTo(StepStatus.READY);
-        audit(ctx, cmd.stepId(), sr.iteration(), "questions.answered", questionsAnsweredPayload(cmd));
+        audit(ctx, cmd.stepId(), sr.iteration(), "question.answered", questionAnsweredPayload(cmd));
         persistAndPublish(ctx);
         dispatch(ctx, ctx.stepDefs.get(cmd.stepId()));
         advance(ctx);
     }
 
-    private static ObjectNode questionsAnsweredPayload(EngineCommand.QuestionsAnswered cmd) {
+    private static ObjectNode questionAnsweredPayload(EngineCommand.QuestionsAnswered cmd) {
         ObjectNode payload = MAPPER.createObjectNode();
+        payload.put("user", cmd.user());
+        payload.put("at", cmd.at().toString());
         ObjectNode answers = payload.putObject("answers");
         cmd.answers().forEach(answers::put);
         return payload;
+    }
+
+    /** One line per round for the round-limit escalation dialog's history tab. */
+    private static String questionRoundSummary(List<PendingQuestion> questions, Map<String, String> answers) {
+        StringBuilder sb = new StringBuilder();
+        for (PendingQuestion q : questions) {
+            sb.append(q.id()).append(": ").append(q.text()).append(" -> ")
+                    .append(answers.getOrDefault(q.id(), "(no answer)")).append('\n');
+        }
+        return sb.toString();
     }
 
     private void handleCancelRun(RunContext ctx) {
@@ -776,6 +855,7 @@ public final class PipelineEngine implements AutoCloseable {
             return;
         }
         ctx.autoRetryCounts.remove(cmd.stepId());
+        resetQuestionRounds(ctx, cmd.stepId());
         StepDefinition def = ctx.stepDefs.get(cmd.stepId());
         warnIfPromptDrifted(ctx, def);
         sr.transitionTo(StepStatus.READY);
@@ -783,6 +863,14 @@ public final class PipelineEngine implements AutoCloseable {
         persistAndPublish(ctx);
         dispatch(ctx, def);
         advance(ctx);
+    }
+
+    /** FR-10.5: a fresh attempt (initial dispatch, judge retry, manual retry) gets a fresh
+     * question-round budget — only a question-answer redispatch (which calls {@link #dispatch}
+     * directly, bypassing this) continues accumulating rounds within the same attempt. */
+    private static void resetQuestionRounds(RunContext ctx, String stepId) {
+        ctx.questionRounds.remove(stepId);
+        ctx.questionRoundHistory.remove(stepId);
     }
 
     /**
@@ -835,6 +923,7 @@ public final class PipelineEngine implements AutoCloseable {
                 }
                 sr.transitionTo(StepStatus.READY);
                 persistAndPublish(ctx);
+                resetQuestionRounds(ctx, def.id());
                 dispatch(ctx, def);
                 changed = true;
             }

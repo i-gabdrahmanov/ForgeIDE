@@ -57,10 +57,21 @@ public sealed interface EngineCommand {
         }
     }
 
-    record QuestionsAnswered(RunId runId, String stepId,
-                              Map<String, String> answers) implements EngineCommand {
+    /**
+     * @param user who answered (OS user, mirrors {@link GateAnswered}'s FR-5.1 audit trail —
+     *              FR-10.6 wants the same "кто, когда" on {@code question.answered}).
+     * @param at    when they answered.
+     */
+    record QuestionsAnswered(RunId runId, String stepId, Map<String, String> answers,
+                              String user, Instant at) implements EngineCommand {
         public QuestionsAnswered {
             answers = Map.copyOf(answers);
+        }
+
+        /** Convenience for call sites that don't care who/when (tests, internal replay) — mirrors
+         * {@link GateAnswered}'s terse overload. */
+        public QuestionsAnswered(RunId runId, String stepId, Map<String, String> answers) {
+            this(runId, stepId, answers, "unknown", Instant.now());
         }
     }
 

@@ -19,7 +19,10 @@ public enum FailureReason {
     /** IDE was killed or the run was cancelled mid-phase. */
     INTERRUPTED,
     /** Non-zero exit code from a script step. */
-    SCRIPT;
+    SCRIPT,
+    /** {@code pending_questions} round limit exhausted (FR-10.5, Т-15) — a human chose
+     * {@code split_step} or {@code cancel} at the question-escalation dialog. */
+    QUESTIONS;
 
     /**
      * Failures that are security incidents (SDD FR-7.6's "tamper/scope/drift" class) stay FAILED

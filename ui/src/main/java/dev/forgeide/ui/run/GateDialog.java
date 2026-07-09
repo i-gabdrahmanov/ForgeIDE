@@ -2,11 +2,13 @@ package dev.forgeide.ui.run;
 
 import dev.forgeide.core.event.EngineEvent;
 import dev.forgeide.core.run.EscalationAction;
+import dev.forgeide.core.run.QuestionEscalationAction;
 import dev.forgeide.runtime.git.GitDiffReader;
 import javafx.application.Platform;
 import javafx.geometry.Insets;
 import javafx.scene.Scene;
 import javafx.scene.Node;
+import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.Label;
@@ -159,6 +161,13 @@ public final class GateDialog {
         if (option.equals(EscalationAction.OVERRIDE.token())) {
             return inlineTextControl(option, "Override reason (обязательна)…", false, requiresAck, diffAck, onAnswer, stage);
         }
+        if (option.equals(QuestionEscalationAction.OPEN_PROMPT.token())) {
+            // FR-10.5 out-of-scope stub (T20 doesn't exist yet): a link that never answers the
+            // engine — the dialog stays open so the human can still pick split_step/cancel.
+            Button stub = new Button(label(option));
+            stub.setOnAction(e -> openPromptStubAlert());
+            return stub;
+        }
         Button button = new Button(label(option));
         if (requiresAck) {
             button.disableProperty().bind(diffAck.selectedProperty().not());
@@ -207,6 +216,14 @@ public final class GateDialog {
         return new VBox(4, reveal, input, submit);
     }
 
+    private static void openPromptStubAlert() {
+        Alert alert = new Alert(Alert.AlertType.INFORMATION,
+                "Промпт-редактор ещё не реализован (T20). Отредактируйте файл промпта вручную "
+                        + "и выберите «Разбить шаг» или «Отмена», либо повторите шаг позже.");
+        alert.setHeaderText("Открыть промпт в редакторе");
+        alert.showAndWait();
+    }
+
     private static String label(String token) {
         return switch (token) {
             case "retry" -> "Повторить";
@@ -214,6 +231,8 @@ public final class GateDialog {
             case "reset_chain" -> "Сбросить цепочку";
             case "cancel" -> "Отмена";
             case "override" -> "Override";
+            case "open_prompt" -> "Открыть промпт в редакторе (заглушка)";
+            case "split_step" -> "Разбить шаг";
             default -> token;
         };
     }

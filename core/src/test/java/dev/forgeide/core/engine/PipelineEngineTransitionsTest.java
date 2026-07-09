@@ -328,6 +328,62 @@ class PipelineEngineTransitionsTest {
     }
 
     @Test
+    void thirdRoundOfQuestionsEscalatesInsteadOfAskingAgain(@TempDir Path repo) throws IOException {
+        Path promptDir = repo.resolve("prompts");
+        Files.createDirectories(promptDir);
+        Files.writeString(promptDir.resolve("work.md"), "Do the thing");
+
+        AgentStep agent = new AgentStep("work", List.of(), "claude", Path.of("prompts/work.md"),
+                List.of(), List.of(), List.of(), RetryPolicy.DEFAULT, BUDGET);
+        PipelineDefinition definition = new PipelineDefinition("p", 1, List.of(agent));
+
+        ObjectMapper mapper = new ObjectMapper();
+        AtomicInteger calls = new AtomicInteger();
+        // A model that never stops asking — FR-10.5 must cap it at 2 rounds regardless.
+        FixtureAgentRuntimePort agentRuntime = new FixtureAgentRuntimePort(inv -> {
+            calls.incrementAndGet();
+            ObjectNode json = mapper.createObjectNode();
+            json.put("step_id", "work");
+            ArrayNode questions = json.putArray("pending_questions");
+            ObjectNode q = questions.addObject();
+            q.put("id", "q1");
+            q.put("text", "Which epic?");
+            q.put("type", "text");
+            return new AgentResult(0, Optional.of(json), new TokenUsage(1, 1), Path.of("raw.log"));
+        });
+
+        try (PipelineEngine engine = engine(FixtureScriptRunnerPort.alwaysOk(), agentRuntime)) {
+            RunId runId = engine.start(TestProjects.minimal(repo), definition, "feature-x");
+
+            // Each wait is anchored on the call count, not just the status, since the status
+            // alone can't distinguish "still round 1" from "already round 2" during the brief
+            // window between submitting an answer and the actor processing it.
+            until(() -> calls.get() == 1
+                    && engine.snapshot(runId).map(s -> statusOf(s, "work") == StepStatus.WAITING_INPUT).orElse(false));
+            engine.submit(new EngineCommand.QuestionsAnswered(runId, "work", Map.of("q1", "round-1-answer")));
+
+            until(() -> calls.get() == 2
+                    && engine.snapshot(runId).map(s -> statusOf(s, "work") == StepStatus.WAITING_INPUT).orElse(false));
+            engine.submit(new EngineCommand.QuestionsAnswered(runId, "work", Map.of("q1", "round-2-answer")));
+
+            // Round 3: escalation, not a 3rd WAITING_INPUT — and the phase does not auto-restart.
+            until(() -> calls.get() == 3
+                    && engine.snapshot(runId).map(s -> statusOf(s, "work") == StepStatus.WAITING_GATE).orElse(false));
+            assertThat(calls.get()).isEqualTo(3);
+
+            engine.submit(new EngineCommand.GateAnswered(runId, "work",
+                    dev.forgeide.core.run.QuestionEscalationAction.SPLIT_STEP.token(), "tester", Instant.now()));
+
+            until(() -> engine.snapshot(runId).map(s -> statusOf(s, "work") == StepStatus.FAILED).orElse(false));
+            RunSnapshot snapshot = engine.snapshot(runId).orElseThrow();
+            assertThat(snapshot.steps().stream().filter(s -> s.stepId().equals("work")).findFirst().orElseThrow()
+                    .failureReason()).contains(FailureReason.QUESTIONS);
+            // No 4th call — the engine never re-dispatched the phase after the escalation.
+            assertThat(calls.get()).isEqualTo(3);
+        }
+    }
+
+    @Test
     void tokenBudgetExceededFailsStepWithBudgetReason(@TempDir Path repo) throws IOException {
         Path promptDir = repo.resolve("prompts");
         Files.createDirectories(promptDir);

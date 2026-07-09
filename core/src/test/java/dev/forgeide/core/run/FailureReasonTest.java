@@ -18,7 +18,10 @@ class FailureReasonTest {
                 FailureReason.TAMPERED,
                 FailureReason.BUDGET,
                 FailureReason.INTERRUPTED,
-                FailureReason.SCRIPT
+                FailureReason.SCRIPT,
+                // Not in the FR-11 table itself — FR-10.5/Т-15's pending_questions round-limit
+                // escalation, resolved as "as FAIL" the same way a judge exhaustion is.
+                FailureReason.QUESTIONS
         );
     }
 

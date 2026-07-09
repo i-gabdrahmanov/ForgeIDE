@@ -63,6 +63,11 @@ public final class RunView extends BorderPane {
     private final Map<String, EngineEvent.GateRequest> pendingGates = new LinkedHashMap<>();
     private final Map<String, Stage> openGateDialogs = new LinkedHashMap<>();
 
+    /** Step id -> its latest unanswered {@code pending_questions} round (FR-10.3: same
+     * dismiss-and-reopen-from-canvas story as a gate, for a step left {@code WAITING_INPUT}). */
+    private final Map<String, EngineEvent.QuestionsPending> pendingQuestions = new LinkedHashMap<>();
+    private final Map<String, Stage> openQuestionDialogs = new LinkedHashMap<>();
+
     public RunView(PipelineEngine engine, StateStore stateStore, ProjectDefinition project,
                    PipelineDefinition pipeline, RunId runId, String featureSlug, Runnable onBack) {
         this.pipeline = pipeline;
@@ -118,6 +123,9 @@ public final class RunView extends BorderPane {
             if (step != null && pendingGates.containsKey(step.id())) {
                 openGateDialog(pendingGates.get(step.id()));
             }
+            if (step != null && pendingQuestions.containsKey(step.id())) {
+                openQuestionDialog(pendingQuestions.get(step.id()));
+            }
         });
 
         viewModel.snapshotProperty().addListener((obs, old, snapshot) -> {
@@ -132,10 +140,12 @@ public final class RunView extends BorderPane {
             retry.setDisable(!isSelectedStepFailed());
             retargetLog();
             prunePendingGates(snapshot);
+            prunePendingQuestions(snapshot);
         });
         Optional.ofNullable(viewModel.snapshotProperty().get()).ifPresent(canvas::applyRunSnapshot);
 
         viewModel.onGateRequest(this::onGateRequest);
+        viewModel.onQuestionsPending(this::onQuestionsPending);
     }
 
     /** T12: opens (or focuses an already-open) dialog the moment the engine asks; the same
@@ -169,6 +179,40 @@ public final class RunView extends BorderPane {
                 .filter(s -> s.stepId().equals(stepId))
                 .findFirst()
                 .map(s -> s.status() != StepStatus.WAITING_GATE)
+                .orElse(true));
+    }
+
+    /** FR-10.3: opens (or focuses an already-open) dialog the moment the engine asks; the same
+     * request is kept so a later canvas click can reopen it if the human dismissed it. */
+    private void onQuestionsPending(EngineEvent.QuestionsPending request) {
+        pendingQuestions.put(request.stepId(), request);
+        openQuestionDialog(request);
+    }
+
+    private void openQuestionDialog(EngineEvent.QuestionsPending request) {
+        Stage existing = openQuestionDialogs.get(request.stepId());
+        if (existing != null) {
+            existing.toFront();
+            existing.requestFocus();
+            return;
+        }
+        Stage stage = QuestionDialog.show(request, project.repositoryPath(),
+                answers -> {
+                    viewModel.answerQuestions(request.stepId(), answers);
+                    pendingQuestions.remove(request.stepId());
+                    openQuestionDialogs.remove(request.stepId());
+                },
+                () -> openQuestionDialogs.remove(request.stepId()));
+        openQuestionDialogs.put(request.stepId(), stage);
+    }
+
+    /** A step that left {@code WAITING_INPUT} (answered, escalated, or cancelled) no longer
+     * needs a reopenable pending question round. */
+    private void prunePendingQuestions(RunSnapshot snapshot) {
+        pendingQuestions.keySet().removeIf(stepId -> snapshot.steps().stream()
+                .filter(s -> s.stepId().equals(stepId))
+                .findFirst()
+                .map(s -> s.status() != StepStatus.WAITING_INPUT)
                 .orElse(true));
     }
 
@@ -255,5 +299,7 @@ public final class RunView extends BorderPane {
         stepLogView.dispose();
         List.copyOf(openGateDialogs.values()).forEach(Stage::close);
         openGateDialogs.clear();
+        List.copyOf(openQuestionDialogs.values()).forEach(Stage::close);
+        openQuestionDialogs.clear();
     }
 }
