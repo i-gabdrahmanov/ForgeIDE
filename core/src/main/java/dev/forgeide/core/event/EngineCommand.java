@@ -1,5 +1,6 @@
 package dev.forgeide.core.event;
 
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.forgeide.core.run.FailureReason;
 import dev.forgeide.core.run.PendingQuestion;
 import dev.forgeide.core.run.RunId;
@@ -73,6 +74,15 @@ public sealed interface EngineCommand {
         public QuestionsAnswered(RunId runId, String stepId, Map<String, String> answers) {
             this(runId, stepId, answers, "unknown", Instant.now());
         }
+    }
+
+    /**
+     * T15 scope: an {@code _origins/<stepId>.json} evidence record a SubagentStop hook
+     * (state-recorder) left next to the manifest projection during this phase — informational
+     * only, handled by appending an {@code evidence.origin} audit entry; unlike every other
+     * command here it never drives a step-status transition.
+     */
+    record EvidenceObserved(RunId runId, String stepId, int iteration, ObjectNode payload) implements EngineCommand {
     }
 
     record CancelRun(RunId runId) implements EngineCommand {

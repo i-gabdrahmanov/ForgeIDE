@@ -26,6 +26,9 @@ final class RunContext {
     final ProjectDefinition project;
     final Path projectRoot;
     final VariableResolver resolver;
+    /** {@link dev.forgeide.core.pipeline.PipelineDefinition#id()} — the {@code <pipeline>}
+     * path segment for the manifest projection (SD §4, T15). */
+    final String pipelineId;
 
     /** Grows as {@link dev.forgeide.core.pipeline.PerTaskLoop} steps unroll (FR-3.5 covers only the static definition). */
     final Map<String, StepDefinition> stepDefs;
@@ -69,11 +72,12 @@ final class RunContext {
      * {@link dev.forgeide.core.engine.PipelineEngine#handleGateAnswered} dispatches on this. */
     final Set<String> questionEscalations = new HashSet<>();
 
-    RunContext(PipelineRun run, ProjectDefinition project, VariableResolver resolver,
+    RunContext(PipelineRun run, ProjectDefinition project, String pipelineId, VariableResolver resolver,
                Map<String, StepDefinition> stepDefs, Map<String, String> promptSnapshots) {
         this.run = run;
         this.project = project;
         this.projectRoot = project.repositoryPath();
+        this.pipelineId = pipelineId;
         this.resolver = resolver;
         this.stepDefs = stepDefs;
         this.promptSnapshots = promptSnapshots;

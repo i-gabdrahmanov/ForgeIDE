@@ -20,6 +20,7 @@ import dev.forgeide.core.port.AgentInvocation;
 import dev.forgeide.core.port.AgentResult;
 import dev.forgeide.core.port.AgentRuntimeException;
 import dev.forgeide.core.port.AgentRuntimePort;
+import dev.forgeide.core.port.ManifestProjectorPort;
 import dev.forgeide.core.port.ScriptInvocation;
 import dev.forgeide.core.port.ScriptResult;
 import dev.forgeide.core.port.ScriptRunnerException;
@@ -90,6 +91,7 @@ public final class PipelineEngine implements AutoCloseable {
     private final StateStore stateStore;
     private final AgentRuntimePort agentRuntime;
     private final ScriptRunnerPort scriptRunner;
+    private final ManifestProjectorPort manifestProjector;
     private final ExecutorService workers;
 
     private final BlockingQueue<Runnable> mailbox = new LinkedBlockingQueue<>();
@@ -100,14 +102,25 @@ public final class PipelineEngine implements AutoCloseable {
     private volatile boolean running = true;
 
     public PipelineEngine(StateStore stateStore, AgentRuntimePort agentRuntime, ScriptRunnerPort scriptRunner) {
-        this(stateStore, agentRuntime, scriptRunner, Executors.newVirtualThreadPerTaskExecutor());
+        this(stateStore, agentRuntime, scriptRunner, ManifestProjectorPort.NOOP, Executors.newVirtualThreadPerTaskExecutor());
+    }
+
+    public PipelineEngine(StateStore stateStore, AgentRuntimePort agentRuntime, ScriptRunnerPort scriptRunner,
+                           ManifestProjectorPort manifestProjector) {
+        this(stateStore, agentRuntime, scriptRunner, manifestProjector, Executors.newVirtualThreadPerTaskExecutor());
     }
 
     public PipelineEngine(StateStore stateStore, AgentRuntimePort agentRuntime, ScriptRunnerPort scriptRunner,
                            ExecutorService workers) {
+        this(stateStore, agentRuntime, scriptRunner, ManifestProjectorPort.NOOP, workers);
+    }
+
+    public PipelineEngine(StateStore stateStore, AgentRuntimePort agentRuntime, ScriptRunnerPort scriptRunner,
+                           ManifestProjectorPort manifestProjector, ExecutorService workers) {
         this.stateStore = Objects.requireNonNull(stateStore, "stateStore");
         this.agentRuntime = Objects.requireNonNull(agentRuntime, "agentRuntime");
         this.scriptRunner = Objects.requireNonNull(scriptRunner, "scriptRunner");
+        this.manifestProjector = Objects.requireNonNull(manifestProjector, "manifestProjector");
         this.workers = Objects.requireNonNull(workers, "workers");
         this.actorThread = new Thread(this::runLoop, "forgeide-pipeline-engine");
         this.actorThread.setDaemon(true);
@@ -233,7 +246,7 @@ public final class PipelineEngine implements AutoCloseable {
             project.paramValues().forEach(resolverBuilder::param);
             VariableResolver resolver = resolverBuilder.build();
 
-            RunContext ctx = new RunContext(run, project, resolver, stepDefs, promptSnapshots);
+            RunContext ctx = new RunContext(run, project, definition.id(), resolver, stepDefs, promptSnapshots);
             runs.put(runId, ctx);
             persistAndPublish(ctx);
             // appendAudit needs the run directory that the persistAndPublish above just created
@@ -244,7 +257,7 @@ public final class PipelineEngine implements AutoCloseable {
         } catch (RuntimeException ex) {
             log.error("failed to start run {} for feature {}", runId, featureSlug, ex);
             run.pause(RunHaltReason.ENGINE_ERROR);
-            RunContext failedCtx = new RunContext(run, project, MapVariableResolver.builder().build(),
+            RunContext failedCtx = new RunContext(run, project, definition.id(), MapVariableResolver.builder().build(),
                     stepDefs, Map.of());
             runs.put(runId, failedCtx);
             persistAndPublish(failedCtx);
@@ -295,7 +308,7 @@ public final class PipelineEngine implements AutoCloseable {
             project.paramValues().forEach(resolverBuilder::param);
             VariableResolver resolver = resolverBuilder.build();
 
-            RunContext ctx = new RunContext(run, project, resolver, stepDefs, promptSnapshots);
+            RunContext ctx = new RunContext(run, project, definition.id(), resolver, stepDefs, promptSnapshots);
             ctx.templateKeyOf.putAll(templateKeyOf);
             replayContext(ctx, stateStore.loadAudit(runId));
 
@@ -306,7 +319,7 @@ public final class PipelineEngine implements AutoCloseable {
         } catch (RuntimeException ex) {
             log.error("failed to resume run {}", runId, ex);
             run.pause(RunHaltReason.ENGINE_ERROR);
-            RunContext failedCtx = new RunContext(run, project, MapVariableResolver.builder().build(), Map.of(), Map.of());
+            RunContext failedCtx = new RunContext(run, project, definition.id(), MapVariableResolver.builder().build(), Map.of(), Map.of());
             runs.put(runId, failedCtx);
             persistAndPublish(failedCtx);
             audit(failedCtx, null, 0, "run.paused",
@@ -420,6 +433,7 @@ public final class PipelineEngine implements AutoCloseable {
                 case EngineCommand.StepFailed c -> handleStepFailed(ctx, c);
                 case EngineCommand.GateAnswered c -> handleGateAnswered(ctx, c);
                 case EngineCommand.QuestionsAnswered c -> handleQuestionsAnswered(ctx, c);
+                case EngineCommand.EvidenceObserved c -> handleEvidenceObserved(ctx, c);
                 case EngineCommand.CancelRun c -> handleCancelRun(ctx);
                 case EngineCommand.RetryStep c -> handleRetryStep(ctx, c);
             }
@@ -437,6 +451,7 @@ public final class PipelineEngine implements AutoCloseable {
             case EngineCommand.StepFailed c -> c.stepId();
             case EngineCommand.GateAnswered c -> c.stepId();
             case EngineCommand.QuestionsAnswered c -> c.stepId();
+            case EngineCommand.EvidenceObserved c -> c.stepId();
             case EngineCommand.RetryStep c -> c.stepId();
             case EngineCommand.CancelRun c -> null;
         };
@@ -529,6 +544,13 @@ public final class PipelineEngine implements AutoCloseable {
             return;
         }
         audit(ctx, cmd.stepId(), cmd.iteration(), "step.failed", failedPayload(cmd.reason(), cmd.detail()));
+        if (cmd.reason() == FailureReason.TAMPERED) {
+            // SR-2/Т-1: a manifest-projection hash mismatch is a security incident, not just an
+            // ordinary step failure — the canonical incident.tamper event (SDD §5.3) carries the
+            // same reason/diff as step.failed above, just filed under its own auditable type so
+            // it is easy to find without scanning every step.failed for reason=TAMPERED.
+            audit(ctx, cmd.stepId(), cmd.iteration(), "incident.tamper", failedPayload(cmd.reason(), cmd.detail()));
+        }
 
         // FR-11.2: auto-retry only the classes that are safe to blindly redo (a dropped stream,
         // a flaky script) and only up to the step's own RetryPolicy count; anything else — and a
@@ -823,6 +845,18 @@ public final class PipelineEngine implements AutoCloseable {
         return payload;
     }
 
+    /** T15 scope: records a {@code _origins/<stepId>.json} evidence sighting without touching
+     * the step's status — the audit trail gets a pointer to it, but the PASSED/FAILED decision
+     * stays exactly what the ordinary dispatch flow already computed ("движок ... переходы
+     * делает сам"). Silently ignored for a stale/unknown step, same spirit as a stale {@code
+     * StepCompleted}/{@code StepFailed} (not worth halting the run over a race with a slow hook). */
+    private void handleEvidenceObserved(RunContext ctx, EngineCommand.EvidenceObserved cmd) {
+        if (!ctx.run.hasStep(cmd.stepId())) {
+            return;
+        }
+        audit(ctx, cmd.stepId(), cmd.iteration(), "evidence.origin", cmd.payload());
+    }
+
     /** One line per round for the round-limit escalation dialog's history tab. */
     private static String questionRoundSummary(List<PendingQuestion> questions, Map<String, String> answers) {
         StringBuilder sb = new StringBuilder();
@@ -1005,6 +1039,12 @@ public final class PipelineEngine implements AutoCloseable {
         }
         RunId runId = ctx.run.id();
         int iteration = markRunning(ctx, step.id());
+        // SD §4/T15: projected on the actor thread, before the phase starts — RunContext.run is
+        // never touched off this thread, so the worker below only ever sees this immutable
+        // snapshot, not the live mutable run.
+        RunSnapshot prePhaseSnapshot = ctx.run.snapshot();
+        String expectedManifestHash = manifestProjector.project(ctx.projectRoot, ctx.pipelineId,
+                ctx.run.featureSlug(), prePhaseSnapshot);
         workers.execute(() -> {
             try {
                 String templateKey = ctx.templateKeyOf.getOrDefault(step.id(), step.id());
@@ -1025,6 +1065,21 @@ public final class PipelineEngine implements AutoCloseable {
                         step.budget().wallClock(), step.budget().tokens(),
                         step.budget().outputMb() * 1024L * 1024L, logDir, binding.get(), Map.of());
                 AgentResult result = agentRuntime.execute(invocation, event -> { });
+
+                // SR-2/Т-1: tamper-check right after the phase, before any other verdict on the
+                // result — a control-plane write outside state-write-guard is a security incident
+                // worth catching even when the phase's own artifacts/budget would otherwise pass.
+                Optional<String> tamperDiff = manifestProjector.verifyAndRestore(ctx.projectRoot, ctx.pipelineId,
+                        ctx.run.featureSlug(), prePhaseSnapshot, expectedManifestHash);
+                if (tamperDiff.isPresent()) {
+                    submit(new EngineCommand.StepFailed(runId, step.id(), iteration, FailureReason.TAMPERED,
+                            tamperDiff.get()));
+                    return;
+                }
+                manifestProjector.readOrigin(ctx.projectRoot, ctx.pipelineId, ctx.run.featureSlug(), step.id())
+                        .ifPresent(origin -> submit(
+                                new EngineCommand.EvidenceObserved(runId, step.id(), iteration, origin)));
+
                 if (result.usage().total() > step.budget().tokens()) {
                     submit(new EngineCommand.StepFailed(runId, step.id(), iteration, FailureReason.BUDGET,
                             "token usage " + result.usage().total() + " exceeded budget " + step.budget().tokens()));
