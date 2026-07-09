@@ -7,8 +7,10 @@ import dev.forgeide.core.vars.VariableResolver;
 
 import java.nio.file.Path;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Per-run bookkeeping the engine actor needs on top of the domain {@link PipelineRun}
@@ -51,6 +53,21 @@ final class RunContext {
      * (FR-11.2); reset on a PASSED transition or a manual retry, never persisted (a restart's own
      * recovery pass — FR-3.4 — always turns an in-flight attempt into a terminal manual retry). */
     final Map<String, Integer> autoRetryCounts = new HashMap<>();
+
+    /** Step id -> {@code pending_questions} rounds asked in the current phase attempt (FR-10.5);
+     * reset at every fresh dispatch (initial run, judge retry, manual retry) but NOT across a
+     * question-answer redispatch — that continuity is the entire point of the limit. Same
+     * never-persisted rationale as {@link #autoRetryCounts}: a restart resets the budget. */
+    final Map<String, Integer> questionRounds = new HashMap<>();
+
+    /** Step id -> human-readable "question -> answer" summary per round so far, for the
+     * round-limit escalation dialog's history tab (shared T12 infra). */
+    final Map<String, List<String>> questionRoundHistory = new HashMap<>();
+
+    /** Step ids currently {@code WAITING_GATE} because their question-round limit was exhausted
+     * (FR-10.5) rather than because they are a real {@code GateStep} or a judge escalation —
+     * {@link dev.forgeide.core.engine.PipelineEngine#handleGateAnswered} dispatches on this. */
+    final Set<String> questionEscalations = new HashSet<>();
 
     RunContext(PipelineRun run, ProjectDefinition project, VariableResolver resolver,
                Map<String, StepDefinition> stepDefs, Map<String, String> promptSnapshots) {

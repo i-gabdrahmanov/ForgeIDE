@@ -10,6 +10,7 @@ import javafx.beans.property.ObjectProperty;
 import javafx.beans.property.SimpleObjectProperty;
 
 import java.time.Instant;
+import java.util.Map;
 import java.util.Optional;
 import java.util.function.Consumer;
 
@@ -25,6 +26,7 @@ public final class RunViewModel {
     private final ObjectProperty<RunSnapshot> snapshot = new SimpleObjectProperty<>();
     private final Consumer<EngineEvent> listener = this::onEvent;
     private Consumer<EngineEvent.GateRequest> gateHandler = r -> { };
+    private Consumer<EngineEvent.QuestionsPending> questionsHandler = r -> { };
 
     public RunViewModel(PipelineEngine engine, RunId runId) {
         this.engine = engine;
@@ -45,12 +47,24 @@ public final class RunViewModel {
         this.gateHandler = handler;
     }
 
+    /** Fired on the FX thread for every {@code pending_questions} round this run publishes
+     * (FR-10.3: same reopen-from-canvas story as a gate — the {@code QuestionDialog} it drives
+     * may pop up more than once for the same step id). */
+    public void onQuestionsPending(Consumer<EngineEvent.QuestionsPending> handler) {
+        this.questionsHandler = handler;
+    }
+
     /** Answers a real gate or a judge escalation (SDD FR-5.1/FR-11.3) — same command either way;
      * {@code detail} carries an escalation's edited prompt or mandatory override reason, {@code
      * diffAcked} the FR-5.3 checkbox state (ignored by the engine unless the gate is R2-risk). */
     public void answerGate(String stepId, String answer, Optional<String> detail, boolean diffAcked) {
         engine.submit(new EngineCommand.GateAnswered(runId, stepId, answer, currentUser(), Instant.now(),
                 detail, diffAcked));
+    }
+
+    /** Answers a {@code pending_questions} round (FR-10.4) — same "who/when" capture as a gate. */
+    public void answerQuestions(String stepId, Map<String, String> answers) {
+        engine.submit(new EngineCommand.QuestionsAnswered(runId, stepId, answers, currentUser(), Instant.now()));
     }
 
     private static String currentUser() {
@@ -77,6 +91,8 @@ public final class RunViewModel {
             Platform.runLater(() -> snapshot.set(updated.snapshot()));
         } else if (event instanceof EngineEvent.GateRequest request && request.runId().equals(runId)) {
             Platform.runLater(() -> gateHandler.accept(request));
+        } else if (event instanceof EngineEvent.QuestionsPending request && request.runId().equals(runId)) {
+            Platform.runLater(() -> questionsHandler.accept(request));
         }
     }
 }

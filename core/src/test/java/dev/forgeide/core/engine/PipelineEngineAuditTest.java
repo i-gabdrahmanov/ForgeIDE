@@ -258,15 +258,19 @@ class PipelineEngineAuditTest {
             until(() -> engine.snapshot(runId).map(s -> statusOf(s, "work") == StepStatus.WAITING_INPUT).orElse(false));
 
             AuditEvent asked = stateStore.loadAudit(runId).stream()
-                    .filter(e -> e.type().equals("questions.asked")).findFirst().orElseThrow();
+                    .filter(e -> e.type().equals("question.asked")).findFirst().orElseThrow();
             assertThat(asked.payload().get("questions").get(0).get("id").asText()).isEqualTo("q1");
+            assertThat(asked.payload().get("questions").get(0).get("type").asText()).isEqualTo("TEXT");
 
-            engine.submit(new EngineCommand.QuestionsAnswered(runId, "work", Map.of("q1", "epic-42")));
+            engine.submit(new EngineCommand.QuestionsAnswered(runId, "work", Map.of("q1", "epic-42"),
+                    "tester", Instant.now()));
 
             until(() -> engine.snapshot(runId).map(s -> s.status() == RunStatus.COMPLETED).orElse(false));
             AuditEvent answered = stateStore.loadAudit(runId).stream()
-                    .filter(e -> e.type().equals("questions.answered")).findFirst().orElseThrow();
+                    .filter(e -> e.type().equals("question.answered")).findFirst().orElseThrow();
             assertThat(answered.payload().get("answers").get("q1").asText()).isEqualTo("epic-42");
+            assertThat(answered.payload().get("user").asText()).isEqualTo("tester");
+            assertThat(answered.payload().hasNonNull("at")).isTrue();
         }
     }
 
