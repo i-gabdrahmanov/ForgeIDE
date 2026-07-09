@@ -21,10 +21,12 @@ import dev.forgeide.core.port.AgentResult;
 import dev.forgeide.core.port.AgentRuntimeException;
 import dev.forgeide.core.port.AgentRuntimePort;
 import dev.forgeide.core.port.ManifestProjectorPort;
+import dev.forgeide.core.port.ScopeDiffPort;
 import dev.forgeide.core.port.ScriptInvocation;
 import dev.forgeide.core.port.ScriptResult;
 import dev.forgeide.core.port.ScriptRunnerException;
 import dev.forgeide.core.port.ScriptRunnerPort;
+import dev.forgeide.core.port.SecretStorePort;
 import dev.forgeide.core.port.StateStore;
 import dev.forgeide.core.project.ProjectDefinition;
 import dev.forgeide.core.project.RiskLevel;
@@ -92,6 +94,8 @@ public final class PipelineEngine implements AutoCloseable {
     private final AgentRuntimePort agentRuntime;
     private final ScriptRunnerPort scriptRunner;
     private final ManifestProjectorPort manifestProjector;
+    private final ScopeDiffPort scopeDiff;
+    private final SecretStorePort secretStore;
     private final ExecutorService workers;
 
     private final BlockingQueue<Runnable> mailbox = new LinkedBlockingQueue<>();
@@ -117,10 +121,25 @@ public final class PipelineEngine implements AutoCloseable {
 
     public PipelineEngine(StateStore stateStore, AgentRuntimePort agentRuntime, ScriptRunnerPort scriptRunner,
                            ManifestProjectorPort manifestProjector, ExecutorService workers) {
+        this(stateStore, agentRuntime, scriptRunner, manifestProjector, ScopeDiffPort.NOOP, SecretStorePort.NOOP, workers);
+    }
+
+    /** T16 scope-diff (SR-6) + env-scoping (SR-5), default {@code workers}. */
+    public PipelineEngine(StateStore stateStore, AgentRuntimePort agentRuntime, ScriptRunnerPort scriptRunner,
+                           ManifestProjectorPort manifestProjector, ScopeDiffPort scopeDiff, SecretStorePort secretStore) {
+        this(stateStore, agentRuntime, scriptRunner, manifestProjector, scopeDiff, secretStore,
+                Executors.newVirtualThreadPerTaskExecutor());
+    }
+
+    public PipelineEngine(StateStore stateStore, AgentRuntimePort agentRuntime, ScriptRunnerPort scriptRunner,
+                           ManifestProjectorPort manifestProjector, ScopeDiffPort scopeDiff, SecretStorePort secretStore,
+                           ExecutorService workers) {
         this.stateStore = Objects.requireNonNull(stateStore, "stateStore");
         this.agentRuntime = Objects.requireNonNull(agentRuntime, "agentRuntime");
         this.scriptRunner = Objects.requireNonNull(scriptRunner, "scriptRunner");
         this.manifestProjector = Objects.requireNonNull(manifestProjector, "manifestProjector");
+        this.scopeDiff = Objects.requireNonNull(scopeDiff, "scopeDiff");
+        this.secretStore = Objects.requireNonNull(secretStore, "secretStore");
         this.workers = Objects.requireNonNull(workers, "workers");
         this.actorThread = new Thread(this::runLoop, "forgeide-pipeline-engine");
         this.actorThread.setDaemon(true);
@@ -550,6 +569,12 @@ public final class PipelineEngine implements AutoCloseable {
             // same reason/diff as step.failed above, just filed under its own auditable type so
             // it is easy to find without scanning every step.failed for reason=TAMPERED.
             audit(ctx, cmd.stepId(), cmd.iteration(), "incident.tamper", failedPayload(cmd.reason(), cmd.detail()));
+        } else if (cmd.reason() == FailureReason.SCOPE) {
+            // SR-6/Т-13: same reasoning as incident.tamper above — a write outside allowed_write
+            // (or a HEAD that moved) is a security incident, filed under its own auditable type
+            // with the violating paths in detail, ready for the incident dialog's "roll back
+            // excess" action.
+            audit(ctx, cmd.stepId(), cmd.iteration(), "incident.scope", failedPayload(cmd.reason(), cmd.detail()));
         }
 
         // FR-11.2: auto-retry only the classes that are safe to blindly redo (a dropped stream,
@@ -1061,10 +1086,24 @@ public final class PipelineEngine implements AutoCloseable {
                 }
                 String prompt = appendContextBlocks(ctx, step.id(), ctx.resolver.render(raw));
                 Path logDir = logDir(ctx, step.id(), iteration);
+                // SR-6/Т-13: taken right before the process starts, as close to the phase's real
+                // start as the pre-phase manifest projection above is to its own start.
+                ScopeDiffPort.Snapshot prePhaseScope = scopeDiff.snapshot(ctx.projectRoot);
+                Map<String, String> env = secretStore.resolve(step.envScope());
                 AgentInvocation invocation = new AgentInvocation(ctx.projectRoot, prompt,
                         step.budget().wallClock(), step.budget().tokens(),
-                        step.budget().outputMb() * 1024L * 1024L, logDir, binding.get(), Map.of());
+                        step.budget().outputMb() * 1024L * 1024L, logDir, binding.get(), env);
                 AgentResult result = agentRuntime.execute(invocation, event -> { });
+
+                // SR-6/Т-13: checked right after the phase, ahead of the tamper check — a write
+                // outside allowed_write (or a HEAD that moved, e.g. a local commit/reset) is a
+                // security incident whether or not the phase's own contract otherwise looks fine.
+                List<String> scopeViolations = scopeDiff.violations(ctx.projectRoot, prePhaseScope, step.allowedWrite());
+                if (!scopeViolations.isEmpty()) {
+                    submit(new EngineCommand.StepFailed(runId, step.id(), iteration, FailureReason.SCOPE,
+                            "write(s) outside allowed_write: " + String.join(", ", scopeViolations)));
+                    return;
+                }
 
                 // SR-2/Т-1: tamper-check right after the phase, before any other verdict on the
                 // result — a control-plane write outside state-write-guard is a security incident
@@ -1169,7 +1208,8 @@ public final class PipelineEngine implements AutoCloseable {
                     Path logDir = logDir(ctx, judge.id(), iteration).resolve("llm");
                     AgentInvocation invocation = new AgentInvocation(ctx.projectRoot, ctx.resolver.render(raw),
                             llm.budget().wallClock(), llm.budget().tokens(),
-                            llm.budget().outputMb() * 1024L * 1024L, logDir, finalLlmBinding, Map.of());
+                            llm.budget().outputMb() * 1024L * 1024L, logDir, finalLlmBinding,
+                            secretStore.resolve(llm.envScope()));
                     AgentResult result = agentRuntime.execute(invocation, event -> { });
                     boolean llmPassed = result.finalJson().map(PipelineEngine::isLlmPass).orElse(false);
                     if (!detail.isEmpty()) {
