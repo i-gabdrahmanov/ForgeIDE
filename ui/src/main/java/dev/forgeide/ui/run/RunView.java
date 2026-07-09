@@ -9,11 +9,13 @@ import dev.forgeide.core.pipeline.validation.PipelineError;
 import dev.forgeide.core.port.StateStore;
 import dev.forgeide.core.port.TileValidityChecker;
 import dev.forgeide.core.project.ProjectDefinition;
+import dev.forgeide.core.run.FailureReason;
 import dev.forgeide.core.run.RunId;
 import dev.forgeide.core.run.RunSnapshot;
 import dev.forgeide.core.run.RunStatus;
 import dev.forgeide.core.run.StepSnapshot;
 import dev.forgeide.core.run.StepStatus;
+import dev.forgeide.runtime.git.GitScopeDiff;
 import dev.forgeide.runtime.state.RunExporter;
 import dev.forgeide.ui.canvas.CanvasView;
 import javafx.application.Platform;
@@ -21,6 +23,7 @@ import javafx.geometry.Insets;
 import javafx.geometry.Orientation;
 import javafx.geometry.Pos;
 import javafx.scene.control.Alert;
+import javafx.scene.control.ButtonType;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.SplitPane;
@@ -51,6 +54,7 @@ public final class RunView extends BorderPane {
     private final CanvasView canvas;
     private final PipelineDefinition pipeline;
     private final RunExporter exporter = new RunExporter();
+    private final GitScopeDiff scopeDiff = new GitScopeDiff();
     private final ProjectDefinition project;
     private final StateStore stateStore;
     private final RunId runId;
@@ -96,6 +100,7 @@ public final class RunView extends BorderPane {
         Button back = new Button("← Back");
         Button cancel = new Button("Cancel run");
         Button retry = new Button("Retry step");
+        Button rollback = new Button("Roll back extra changes");
         Button export = new Button("Export…");
         Label status = new Label();
         back.setOnAction(e -> {
@@ -109,8 +114,11 @@ public final class RunView extends BorderPane {
             }
         });
         retry.setDisable(true);
+        rollback.setOnAction(e -> rollbackScope());
+        rollback.setDisable(true);
         export.setOnAction(e -> exportRun());
-        HBox header = new HBox(12, back, new Label(project.name() + " · " + featureSlug), cancel, retry, export, status);
+        HBox header = new HBox(12, back, new Label(project.name() + " · " + featureSlug), cancel, retry, rollback,
+                export, status);
         header.setAlignment(Pos.CENTER_LEFT);
         header.setPadding(new Insets(12));
         setTop(header);
@@ -120,6 +128,7 @@ public final class RunView extends BorderPane {
             lastTargetIteration = -1;
             retargetLog();
             retry.setDisable(!isSelectedStepFailed());
+            rollback.setDisable(!isSelectedStepScopeViolation());
             if (step != null && pendingGates.containsKey(step.id())) {
                 openGateDialog(pendingGates.get(step.id()));
             }
@@ -138,6 +147,7 @@ public final class RunView extends BorderPane {
                     || snapshot.status() == RunStatus.STOPPED;
             cancel.setDisable(terminal);
             retry.setDisable(!isSelectedStepFailed());
+            rollback.setDisable(!isSelectedStepScopeViolation());
             retargetLog();
             prunePendingGates(snapshot);
             prunePendingQuestions(snapshot);
@@ -232,6 +242,46 @@ public final class RunView extends BorderPane {
                 .findFirst()
                 .map(s -> s.status() == StepStatus.FAILED)
                 .orElse(false);
+    }
+
+    /** {@code Roll back extra changes} (T16 scope, SR-6/Т-13's incident-dialog affordance) is
+     * only enabled for a step FAILED specifically with {@code SCOPE} — the one failure reason
+     * that actually names files worth reverting. */
+    private boolean isSelectedStepScopeViolation() {
+        if (selectedStep == null) {
+            return false;
+        }
+        RunSnapshot snapshot = viewModel.snapshotProperty().get();
+        if (snapshot == null) {
+            return false;
+        }
+        return snapshot.steps().stream()
+                .filter(s -> s.stepId().equals(selectedStep.id()))
+                .findFirst()
+                .map(s -> s.status() == StepStatus.FAILED && s.failureReason().filter(r -> r == FailureReason.SCOPE).isPresent())
+                .orElse(false);
+    }
+
+    /** Reverts strictly the files {@code incident.scope}'s own audit detail named for the
+     * selected step (SR-6) — never a broader {@code git clean}/{@code reset}, and never without
+     * the human confirming the exact list first. */
+    private void rollbackScope() {
+        if (selectedStep == null) {
+            return;
+        }
+        List<String> violations = ScopeIncident.violatingPaths(stateStore.loadAudit(runId), selectedStep.id());
+        if (violations.isEmpty()) {
+            info("Nothing to roll back", "No scope-violation file list recorded for this step.");
+            return;
+        }
+        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                "Revert exactly these file(s) to their state before this phase started?\n\n"
+                        + String.join("\n", violations));
+        confirm.setHeaderText("Roll back " + violations.size() + " file(s) outside allowed_write");
+        confirm.showAndWait().filter(b -> b == ButtonType.OK).ifPresent(b -> {
+            List<String> restored = scopeDiff.rollback(project.repositoryPath(), violations);
+            info("Rollback complete", "Restored " + restored.size() + " of " + violations.size() + " file(s).");
+        });
     }
 
     /** Called from the Timeline's "jump to log" action. */
