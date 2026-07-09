@@ -1,0 +1,8 @@
+version: 1
+id: p
+steps:
+  - id: g
+    type: gate
+    question: "Ship it?"
+    options: [approve]
+    risk: R9

@@ -9,6 +9,7 @@ import dev.forgeide.core.pipeline.PipelineDefinition;
 import dev.forgeide.core.pipeline.ScriptStep;
 import dev.forgeide.core.pipeline.validation.InvalidPipelineException;
 import dev.forgeide.core.pipeline.validation.PipelineValidator;
+import dev.forgeide.core.project.RiskLevel;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -86,6 +87,22 @@ class PipelineYamlTest {
     }
 
     @Test
+    void gateDeclaresItsOwnRiskLevel() {
+        PipelineDefinition def = PipelineTemplates.forgelite();
+
+        assertThat(((GateStep) def.step("gate-design")).risk()).isEqualTo(RiskLevel.R1);
+        assertThat(((GateStep) def.step("gate-deliver")).risk()).isEqualTo(RiskLevel.R2);
+    }
+
+    @Test
+    void gateWithoutDeclaredRiskDefaultsToR1() {
+        PipelineDefinition def = yaml.parse(read("/pipelines/valid/extras.yaml"));
+
+        GateStep gate = (GateStep) def.step("gate-ship");
+        assertThat(gate.risk()).isEqualTo(RiskLevel.R1);
+    }
+
+    @Test
     void parsesExtrasWithAllStepTypes() {
         PipelineDefinition def = yaml.parse(read("/pipelines/valid/extras.yaml"));
 
@@ -129,6 +146,7 @@ class PipelineYamlTest {
                 arguments("missing-prompt.yaml", "a", "prompt", "prompt"),
                 arguments("unknown-type.yaml", "a", "type", "wizard"),
                 arguments("gate-no-options.yaml", "g", "options", "option"),
+                arguments("gate-unknown-risk.yaml", "g", "risk", "R9"),
                 arguments("outward-no-judge.yaml", "d", "depends_on", "judge"),
                 arguments("unknown-variable-scope.yaml", "a", "prompt", "scope"),
                 arguments("undeclared-param.yaml", "a", "expects", "undeclared param"),

@@ -26,8 +26,10 @@ import dev.forgeide.core.port.ScriptRunnerException;
 import dev.forgeide.core.port.ScriptRunnerPort;
 import dev.forgeide.core.port.StateStore;
 import dev.forgeide.core.project.ProjectDefinition;
+import dev.forgeide.core.project.RiskLevel;
 import dev.forgeide.core.project.RuntimeBinding;
 import dev.forgeide.core.run.AuditRef;
+import dev.forgeide.core.run.EscalationAction;
 import dev.forgeide.core.run.FailureReason;
 import dev.forgeide.core.run.JudgeVerdict;
 import dev.forgeide.core.run.PendingQuestion;
@@ -50,6 +52,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -562,13 +565,25 @@ public final class PipelineEngine implements AutoCloseable {
         } else {
             judgeRun.transitionTo(StepStatus.WAITING_GATE);
             String question = "Judge exhausted " + judge.failPolicy().maxIterations() + " iteration(s) for step '"
-                    + targetId + "'. Retry gives it one more attempt; cancel fails the judge.";
+                    + targetId + "'. Choose how to proceed.";
+            List<String> options = Arrays.stream(EscalationAction.values()).map(EscalationAction::token).toList();
             audit(ctx, judge.id(), judgeRun.iteration(), "gate.requested",
-                    gateRequestedPayload(question, List.of("retry", "cancel"), targetId));
+                    gateRequestedPayload(question, options, targetId));
             persistAndPublish(ctx);
-            publish(new EngineEvent.GateRequest(ctx.run.id(), judge.id(), question,
-                    List.of("retry", "cancel"), List.of()));
+            List<String> errorsHistory = List.copyOf(ctx.accumulatedErrors.getOrDefault(targetId, List.of()));
+            publish(new EngineEvent.GateRequest(ctx.run.id(), judge.id(), question, options,
+                    escalationArtifacts(ctx, targetId), RiskLevel.R1, errorsHistory));
         }
+    }
+
+    /** Real artifacts (not glob-scoped) an escalation's target step declared, for the escalation
+     * dialog's diff view (FR-5.2/FR-11.3: real data from disk, not the model's own word). */
+    private List<Path> escalationArtifacts(RunContext ctx, String targetId) {
+        StepDefinition target = ctx.stepDefs.get(targetId);
+        if (target instanceof AgentStep agent) {
+            return agent.expectedArtifacts().stream().map(ctx.projectRoot::resolve).toList();
+        }
+        return List.of();
     }
 
     private static ObjectNode verdictPayload(String targetStepId, boolean passed, String detail) {
@@ -605,27 +620,20 @@ public final class PipelineEngine implements AutoCloseable {
                 log.warn("answer '{}' is not one of {} for gate {}", cmd.answer(), gate.options(), cmd.stepId());
                 return;
             }
+            // FR-5.3: an R2-risk gate cannot be confirmed without the diff-ack checkbox — checked
+            // here too, not just by the dialog disabling its own buttons (SD §4: the UI is
+            // untrusted-adjacent, the engine has the final say).
+            if (gate.risk() == RiskLevel.R2 && !cmd.diffAcked()) {
+                log.warn("gate {} (risk R2) rejected: diff-ack checkbox not confirmed (FR-5.3)", cmd.stepId());
+                return;
+            }
             ctx.gateAnswers.put(cmd.stepId(), cmd.answer());
             sr.transitionTo(StepStatus.PASSED);
             audit(ctx, cmd.stepId(), sr.iteration(), "gate.answered", gateAnsweredPayload(cmd));
             persistAndPublish(ctx);
         } else if (def instanceof JudgeStep judge) {
-            switch (cmd.answer()) {
-                case "retry" -> {
-                    audit(ctx, cmd.stepId(), sr.iteration(), "gate.answered", gateAnsweredPayload(cmd));
-                    StepRun targetRun = ctx.run.step(judge.targetStepId());
-                    targetRun.transitionTo(StepStatus.READY);
-                    persistAndPublish(ctx);
-                    dispatch(ctx, ctx.stepDefs.get(judge.targetStepId()));
-                    sr.transitionTo(StepStatus.PENDING);
-                    persistAndPublish(ctx);
-                }
-                case "cancel" -> {
-                    audit(ctx, cmd.stepId(), sr.iteration(), "gate.answered", gateAnsweredPayload(cmd));
-                    sr.markFailed(FailureReason.JUDGE);
-                    persistAndPublish(ctx);
-                }
-                default -> log.warn("unknown escalation answer '{}' for judge {}", cmd.answer(), cmd.stepId());
+            if (!handleEscalationAnswer(ctx, judge, sr, cmd)) {
+                return;
             }
         } else {
             log.warn("gate answered for a step that is neither a gate nor an escalated judge: {}", cmd.stepId());
@@ -634,11 +642,90 @@ public final class PipelineEngine implements AutoCloseable {
         advance(ctx);
     }
 
+    /**
+     * FR-11.3 escalation resolution — the same {@code GateAnswered} command a real gate answers
+     * with, dispatched over {@link EscalationAction} instead of the gate's own free-form options.
+     * Returns {@code false} for an answer the engine refuses (unknown token, or a mandatory
+     * {@code detail} missing/blank) so the caller can skip the generic {@link #advance} — the
+     * step is left exactly as it was, still {@code WAITING_GATE}.
+     */
+    private boolean handleEscalationAnswer(RunContext ctx, JudgeStep judge, StepRun sr, EngineCommand.GateAnswered cmd) {
+        Optional<EscalationAction> action = EscalationAction.fromToken(cmd.answer());
+        if (action.isEmpty()) {
+            log.warn("unknown escalation answer '{}' for judge {}", cmd.answer(), cmd.stepId());
+            return false;
+        }
+        String targetId = judge.targetStepId();
+        switch (action.get()) {
+            case RETRY -> {
+                audit(ctx, cmd.stepId(), sr.iteration(), "gate.answered", gateAnsweredPayload(cmd));
+                retryEscalationTarget(ctx, judge, sr);
+            }
+            case EDIT_PROMPT -> {
+                String edited = cmd.detail().orElse("");
+                if (edited.isBlank()) {
+                    log.warn("edit_prompt escalation for {} rejected: replacement prompt is blank", cmd.stepId());
+                    return false;
+                }
+                ctx.promptOverrides.put(targetId, edited);
+                audit(ctx, cmd.stepId(), sr.iteration(), "gate.answered", gateAnsweredPayload(cmd));
+                retryEscalationTarget(ctx, judge, sr);
+            }
+            case RESET_CHAIN -> {
+                ctx.accumulatedErrors.remove(targetId);
+                sr.resetIteration();
+                audit(ctx, cmd.stepId(), sr.iteration(), "gate.answered", gateAnsweredPayload(cmd));
+                retryEscalationTarget(ctx, judge, sr);
+            }
+            case CANCEL -> {
+                audit(ctx, cmd.stepId(), sr.iteration(), "gate.answered", gateAnsweredPayload(cmd));
+                sr.markFailed(FailureReason.JUDGE);
+                persistAndPublish(ctx);
+            }
+            case OVERRIDE -> {
+                String reason = cmd.detail().orElse("");
+                if (reason.isBlank()) {
+                    log.warn("override for {} rejected: reason is mandatory (FR-11.3/Т-17)", cmd.stepId());
+                    return false;
+                }
+                audit(ctx, cmd.stepId(), sr.iteration(), "gate.answered", gateAnsweredPayload(cmd));
+                audit(ctx, targetId, ctx.run.step(targetId).iteration(), "judge.overridden",
+                        overridePayload(judge.id(), reason));
+                ctx.accumulatedErrors.remove(targetId);
+                ctx.run.step(targetId).transitionTo(StepStatus.PASSED);
+                sr.transitionTo(StepStatus.PASSED);
+                persistAndPublish(ctx);
+            }
+        }
+        return true;
+    }
+
+    /** Shared continuation for the three escalation actions that give the target step one more
+     * run ({@code retry}, {@code edit_prompt}, {@code reset_chain}) — identical to the plain
+     * manual-retry flow, just reached from the escalation dialog instead of a FAILED tile. */
+    private void retryEscalationTarget(RunContext ctx, JudgeStep judge, StepRun escalationRun) {
+        StepRun targetRun = ctx.run.step(judge.targetStepId());
+        targetRun.transitionTo(StepStatus.READY);
+        persistAndPublish(ctx);
+        dispatch(ctx, ctx.stepDefs.get(judge.targetStepId()));
+        escalationRun.transitionTo(StepStatus.PENDING);
+        persistAndPublish(ctx);
+    }
+
     private static ObjectNode gateAnsweredPayload(EngineCommand.GateAnswered cmd) {
         ObjectNode payload = MAPPER.createObjectNode();
         payload.put("answer", cmd.answer());
         payload.put("user", cmd.user());
         payload.put("at", cmd.at().toString());
+        cmd.detail().ifPresent(d -> payload.put("detail", d));
+        payload.put("diffAcked", cmd.diffAcked());
+        return payload;
+    }
+
+    private static ObjectNode overridePayload(String judgeStepId, String reason) {
+        ObjectNode payload = MAPPER.createObjectNode();
+        payload.put("judgeStepId", judgeStepId);
+        payload.put("reason", reason);
         return payload;
     }
 
@@ -832,7 +919,12 @@ public final class PipelineEngine implements AutoCloseable {
         workers.execute(() -> {
             try {
                 String templateKey = ctx.templateKeyOf.getOrDefault(step.id(), step.id());
-                String raw = ctx.promptSnapshots.get(templateKey);
+                // FR-11.3 "edit_prompt" escalation action: a one-shot human replacement for this
+                // single attempt, consumed here rather than left to leak into later iterations.
+                String raw = ctx.promptOverrides.remove(step.id());
+                if (raw == null) {
+                    raw = ctx.promptSnapshots.get(templateKey);
+                }
                 if (raw == null) {
                     submit(new EngineCommand.StepFailed(runId, step.id(), iteration, FailureReason.ARTIFACTS,
                             "no prompt snapshot for " + templateKey));
@@ -960,7 +1052,8 @@ public final class PipelineEngine implements AutoCloseable {
         audit(ctx, gate.id(), sr.iteration(), "gate.requested", gateRequestedPayload(gate.question(), gate.options(), gate.id()));
         persistAndPublish(ctx);
         List<Path> artifacts = gate.showArtifacts().stream().map(ctx.projectRoot::resolve).toList();
-        publish(new EngineEvent.GateRequest(ctx.run.id(), gate.id(), gate.question(), gate.options(), artifacts));
+        publish(new EngineEvent.GateRequest(ctx.run.id(), gate.id(), gate.question(), gate.options(), artifacts,
+                gate.risk(), List.of()));
     }
 
     private void dispatchBranch(RunContext ctx, BranchStep branch) {

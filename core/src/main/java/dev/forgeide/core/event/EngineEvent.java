@@ -1,5 +1,6 @@
 package dev.forgeide.core.event;
 
+import dev.forgeide.core.project.RiskLevel;
 import dev.forgeide.core.run.FailureReason;
 import dev.forgeide.core.run.PendingQuestion;
 import dev.forgeide.core.run.RunId;
@@ -24,12 +25,20 @@ public sealed interface EngineEvent {
         }
     }
 
-    /** Published when a {@code GateStep} becomes {@code WAITING_GATE} (SD §6). */
-    record GateRequest(RunId runId, String stepId, String question,
-                        List<String> options, List<Path> artifacts) implements EngineEvent {
+    /**
+     * Published when a {@code GateStep} becomes {@code WAITING_GATE} (SD §6), and also — with
+     * the same shared dialog infrastructure (FR-11.3) — when a judge exhausts its {@code
+     * fail_policy} and escalates to a human. {@code risk} drives the FR-5.3 diff-ack checkbox
+     * for real gates (escalations always pass {@code R1}, which does not force it); {@code
+     * errorsHistory} is only non-empty for an escalation (the judge's accumulated failure detail
+     * per iteration) and is untrusted the moment it includes an LLM-judge verdict.
+     */
+    record GateRequest(RunId runId, String stepId, String question, List<String> options,
+                        List<Path> artifacts, RiskLevel risk, List<String> errorsHistory) implements EngineEvent {
         public GateRequest {
             options = List.copyOf(options);
             artifacts = List.copyOf(artifacts);
+            errorsHistory = List.copyOf(errorsHistory);
         }
     }
 

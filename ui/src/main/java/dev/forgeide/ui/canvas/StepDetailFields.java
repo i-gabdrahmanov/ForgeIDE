@@ -59,6 +59,7 @@ public final class StepDetailFields {
                 fields.add(new Field("question", g.question()));
                 fields.add(new Field("options", joinOrNone(g.options())));
                 fields.add(new Field("show", joinPaths(g.showArtifacts())));
+                fields.add(new Field("risk", g.risk().name()));
             }
             case BranchStep b -> fields.add(new Field("routes", b.routes().entrySet().stream()
                     .map(e -> e.getKey() + " → " + e.getValue())
