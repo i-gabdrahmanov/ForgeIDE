@@ -25,6 +25,7 @@ import dev.forgeide.core.port.HarnessGuardPort;
 import dev.forgeide.core.port.ManifestProjectorPort;
 import dev.forgeide.core.port.OutwardActionException;
 import dev.forgeide.core.port.OutwardActionsPort;
+import dev.forgeide.core.port.ProcessSweepPort;
 import dev.forgeide.core.port.ScopeDiffPort;
 import dev.forgeide.core.port.ScriptInvocation;
 import dev.forgeide.core.port.ScriptResult;
@@ -107,6 +108,7 @@ public final class PipelineEngine implements AutoCloseable {
     private final SecretStorePort secretStore;
     private final OutwardActionsPort outwardActions;
     private final HarnessGuardPort harnessGuard;
+    private final ProcessSweepPort processSweep;
     private final ExecutorService workers;
 
     private final BlockingQueue<Runnable> mailbox = new LinkedBlockingQueue<>();
@@ -168,12 +170,28 @@ public final class PipelineEngine implements AutoCloseable {
                            ManifestProjectorPort manifestProjector, ScopeDiffPort scopeDiff, SecretStorePort secretStore,
                            OutwardActionsPort outwardActions, HarnessGuardPort harnessGuard) {
         this(stateStore, agentRuntime, scriptRunner, manifestProjector, scopeDiff, secretStore, outwardActions,
-                harnessGuard, Executors.newVirtualThreadPerTaskExecutor());
+                harnessGuard, ProcessSweepPort.NOOP);
     }
 
     public PipelineEngine(StateStore stateStore, AgentRuntimePort agentRuntime, ScriptRunnerPort scriptRunner,
                            ManifestProjectorPort manifestProjector, ScopeDiffPort scopeDiff, SecretStorePort secretStore,
                            OutwardActionsPort outwardActions, HarnessGuardPort harnessGuard, ExecutorService workers) {
+        this(stateStore, agentRuntime, scriptRunner, manifestProjector, scopeDiff, secretStore, outwardActions,
+                harnessGuard, ProcessSweepPort.NOOP, workers);
+    }
+
+    /** T19 orphan-process sweep (SR-9/Т-9), default {@code workers}. */
+    public PipelineEngine(StateStore stateStore, AgentRuntimePort agentRuntime, ScriptRunnerPort scriptRunner,
+                           ManifestProjectorPort manifestProjector, ScopeDiffPort scopeDiff, SecretStorePort secretStore,
+                           OutwardActionsPort outwardActions, HarnessGuardPort harnessGuard, ProcessSweepPort processSweep) {
+        this(stateStore, agentRuntime, scriptRunner, manifestProjector, scopeDiff, secretStore, outwardActions,
+                harnessGuard, processSweep, Executors.newVirtualThreadPerTaskExecutor());
+    }
+
+    public PipelineEngine(StateStore stateStore, AgentRuntimePort agentRuntime, ScriptRunnerPort scriptRunner,
+                           ManifestProjectorPort manifestProjector, ScopeDiffPort scopeDiff, SecretStorePort secretStore,
+                           OutwardActionsPort outwardActions, HarnessGuardPort harnessGuard, ProcessSweepPort processSweep,
+                           ExecutorService workers) {
         this.stateStore = Objects.requireNonNull(stateStore, "stateStore");
         this.agentRuntime = Objects.requireNonNull(agentRuntime, "agentRuntime");
         this.scriptRunner = Objects.requireNonNull(scriptRunner, "scriptRunner");
@@ -182,6 +200,7 @@ public final class PipelineEngine implements AutoCloseable {
         this.secretStore = Objects.requireNonNull(secretStore, "secretStore");
         this.outwardActions = Objects.requireNonNull(outwardActions, "outwardActions");
         this.harnessGuard = Objects.requireNonNull(harnessGuard, "harnessGuard");
+        this.processSweep = Objects.requireNonNull(processSweep, "processSweep");
         this.workers = Objects.requireNonNull(workers, "workers");
         this.actorThread = new Thread(this::runLoop, "forgeide-pipeline-engine");
         this.actorThread.setDaemon(true);
@@ -516,6 +535,7 @@ public final class PipelineEngine implements AutoCloseable {
                 case EngineCommand.GateAnswered c -> handleGateAnswered(ctx, c);
                 case EngineCommand.QuestionsAnswered c -> handleQuestionsAnswered(ctx, c);
                 case EngineCommand.EvidenceObserved c -> handleEvidenceObserved(ctx, c);
+                case EngineCommand.OrphanProcessesSwept c -> handleOrphanProcessesSwept(ctx, c);
                 case EngineCommand.OutwardCompleted c -> handleOutwardCompleted(ctx, c);
                 case EngineCommand.HarnessDriftResolved c -> handleHarnessDriftResolved(ctx, c);
                 case EngineCommand.CancelRun c -> handleCancelRun(ctx);
@@ -536,6 +556,7 @@ public final class PipelineEngine implements AutoCloseable {
             case EngineCommand.GateAnswered c -> c.stepId();
             case EngineCommand.QuestionsAnswered c -> c.stepId();
             case EngineCommand.EvidenceObserved c -> c.stepId();
+            case EngineCommand.OrphanProcessesSwept c -> c.stepId();
             case EngineCommand.OutwardCompleted c -> c.stepId();
             case EngineCommand.RetryStep c -> c.stepId();
             case EngineCommand.HarnessDriftResolved c -> null;
@@ -950,6 +971,22 @@ public final class PipelineEngine implements AutoCloseable {
         audit(ctx, cmd.stepId(), cmd.iteration(), "evidence.origin", cmd.payload());
     }
 
+    /** T19/SR-9/Т-9: informational only — an orphan sweep never touches step status, same spirit
+     * as {@link #handleEvidenceObserved}. */
+    private void handleOrphanProcessesSwept(RunContext ctx, EngineCommand.OrphanProcessesSwept cmd) {
+        if (!ctx.run.hasStep(cmd.stepId())) {
+            return;
+        }
+        audit(ctx, cmd.stepId(), cmd.iteration(), "incident.orphan_process", orphanSweptPayload(cmd.pids()));
+    }
+
+    private static ObjectNode orphanSweptPayload(List<Long> pids) {
+        ObjectNode payload = MAPPER.createObjectNode();
+        ArrayNode array = payload.putArray("pids");
+        pids.forEach(array::add);
+        return payload;
+    }
+
     /** One line per round for the round-limit escalation dialog's history tab. */
     private static String questionRoundSummary(List<PendingQuestion> questions, Map<String, String> answers) {
         StringBuilder sb = new StringBuilder();
@@ -1170,6 +1207,15 @@ public final class PipelineEngine implements AutoCloseable {
                         step.budget().wallClock(), step.budget().tokens(),
                         step.budget().outputMb() * 1024L * 1024L, logDir, binding.get(), env);
                 AgentResult result = agentRuntime.execute(invocation, event -> { });
+
+                // SR-9/Т-9: swept unconditionally, right after the phase, regardless of its own
+                // outcome — an escapee that dodged the phase's own process-group kill by
+                // nohup/setsid'ing out of it is an incident to record, not a reason to also fail
+                // the step (the step's own PASS/FAIL is decided entirely by the checks below).
+                List<Long> orphans = processSweep.sweepOrphans(ctx.projectRoot);
+                if (!orphans.isEmpty()) {
+                    submit(new EngineCommand.OrphanProcessesSwept(runId, step.id(), iteration, orphans));
+                }
 
                 // SR-6/Т-13: checked right after the phase, ahead of the tamper check — a write
                 // outside allowed_write (or a HEAD that moved, e.g. a local commit/reset) is a

@@ -23,6 +23,7 @@ class EngineCommandEventTest {
             case EngineCommand.GateAnswered ignored -> "gate-answered";
             case EngineCommand.QuestionsAnswered ignored -> "questions-answered";
             case EngineCommand.EvidenceObserved ignored -> "evidence-observed";
+            case EngineCommand.OrphanProcessesSwept ignored -> "orphan-processes-swept";
             case EngineCommand.OutwardCompleted ignored -> "outward-completed";
             case EngineCommand.HarnessDriftResolved ignored -> "harness-drift-resolved";
             case EngineCommand.CancelRun ignored -> "cancel-run";
