@@ -6,6 +6,7 @@ import dev.forgeide.core.pipeline.JudgeStep;
 import dev.forgeide.core.pipeline.OutwardAction;
 import dev.forgeide.core.pipeline.OutwardStep;
 import dev.forgeide.core.pipeline.PipelineDefinition;
+import dev.forgeide.core.pipeline.ScriptStep;
 import dev.forgeide.core.pipeline.validation.InvalidPipelineException;
 import dev.forgeide.core.pipeline.validation.PipelineValidator;
 import org.junit.jupiter.api.Test;
@@ -92,6 +93,10 @@ class PipelineYamlTest {
         assertThat(review.llmJudge()).isPresent();
         assertThat(review.deterministicCheck()).isPresent();
         assertThat(review.failPolicy().maxIterations()).isEqualTo(2);
+
+        ScriptStep build = (ScriptStep) def.step("build");
+        assertThat(build.retry().script()).isEqualTo(2);
+        assertThat(build.retry().stream()).isEqualTo(1); // default materialised
     }
 
     // ---- round-trip -------------------------------------------------------------------

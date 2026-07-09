@@ -31,7 +31,8 @@ import java.util.Optional;
 public final class ProjectDetailView extends BorderPane {
 
     public ProjectDetailView(ProjectDefinition project, RuntimeAvailabilityChecker checker,
-                              Runnable onEdit, Runnable onBack, Runnable onOpenCanvas, Runnable onStartRun) {
+                              Runnable onEdit, Runnable onBack, Runnable onOpenCanvas, Runnable onStartRun,
+                              Runnable onRunHistory) {
         Button back = new Button("← Projects");
         back.setOnAction(e -> onBack.run());
         Button edit = new Button("Edit");
@@ -40,7 +41,9 @@ public final class ProjectDetailView extends BorderPane {
         openCanvas.setOnAction(e -> onOpenCanvas.run());
         Button startRun = new Button("Start run");
         startRun.setOnAction(e -> onStartRun.run());
-        HBox header = new HBox(12, back, edit, openCanvas, startRun);
+        Button runHistory = new Button("Run history");
+        runHistory.setOnAction(e -> onRunHistory.run());
+        HBox header = new HBox(12, back, edit, openCanvas, startRun, runHistory);
         header.setPadding(new Insets(12));
         setTop(header);
 

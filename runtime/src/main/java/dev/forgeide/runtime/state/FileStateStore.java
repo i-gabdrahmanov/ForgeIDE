@@ -123,6 +123,27 @@ public final class FileStateStore implements StateStore {
         }
     }
 
+    /**
+     * Every run id under this store's root, across every feature slug — used only by the
+     * IDE-startup recovery pass (SDD FR-3.4; see {@code StartupRecovery}), which has to sweep
+     * every persisted run before any {@link dev.forgeide.core.engine.PipelineEngine} exists to
+     * legitimately still be executing one of them.
+     */
+    public List<RunId> listAllRuns() {
+        if (!Files.isDirectory(stateRoot)) {
+            return List.of();
+        }
+        try (var features = Files.list(stateRoot)) {
+            List<RunId> all = new ArrayList<>();
+            for (Path featureDir : features.filter(Files::isDirectory).toList()) {
+                all.addAll(listRuns(featureDir.getFileName().toString()));
+            }
+            return all;
+        } catch (IOException e) {
+            throw new UncheckedIOException("cannot list all runs under: " + stateRoot, e);
+        }
+    }
+
     @Override
     public long appendAudit(AuditEvent event) {
         Path dir = resolveRunDir(event.runId());

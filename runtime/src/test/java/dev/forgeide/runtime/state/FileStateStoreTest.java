@@ -68,6 +68,23 @@ class FileStateStoreTest {
     }
 
     @Test
+    void listAllRunsSweepsEveryFeatureSlug() {
+        RunId r1 = RunId.newId();
+        RunId r2 = RunId.newId();
+        RunId r3 = RunId.newId();
+        store.save(fullSnapshot(r1, "feat-a"));
+        store.save(fullSnapshot(r2, "feat-a"));
+        store.save(fullSnapshot(r3, "feat-b"));
+
+        assertThat(store.listAllRuns()).containsExactlyInAnyOrder(r1, r2, r3);
+    }
+
+    @Test
+    void listAllRunsOnAnEmptyStoreIsEmpty() {
+        assertThat(store.listAllRuns()).isEmpty();
+    }
+
+    @Test
     void tamperedRunJsonChecksumIsRejectedOnLoad() throws IOException {
         RunId runId = RunId.newId();
         store.save(fullSnapshot(runId, "feat-tamper"));

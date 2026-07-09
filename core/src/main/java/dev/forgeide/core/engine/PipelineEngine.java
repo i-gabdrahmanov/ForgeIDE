@@ -123,6 +123,20 @@ public final class PipelineEngine implements AutoCloseable {
         return runId;
     }
 
+    /**
+     * Rehydrates a run persisted by an earlier (now dead) process into this engine (SDD FR-3.4) —
+     * typically right after {@code StartupRecovery} has turned an abandoned step into a terminal
+     * {@code FAILED(interrupted)} a human can retry. A no-op if {@code runId} is already live in
+     * this engine. Returns immediately; the run becomes visible via {@link #subscribe} / {@link
+     * #snapshot} shortly after, same as {@link #start}.
+     */
+    public void resume(ProjectDefinition project, PipelineDefinition definition, RunId runId) {
+        Objects.requireNonNull(project, "project");
+        Objects.requireNonNull(definition, "definition");
+        Objects.requireNonNull(runId, "runId");
+        enqueue(() -> rehydrate(project, definition, runId));
+    }
+
     /** Posts a command from the UI or a step executor into the actor's mailbox. */
     public void submit(EngineCommand command) {
         Objects.requireNonNull(command, "command");
@@ -232,6 +246,132 @@ public final class PipelineEngine implements AutoCloseable {
         }
     }
 
+    // ---- resume (FR-3.4) --------------------------------------------------------------------
+
+    private void rehydrate(ProjectDefinition project, PipelineDefinition definition, RunId runId) {
+        if (runs.containsKey(runId)) {
+            return;
+        }
+        Optional<RunSnapshot> loaded = stateStore.load(runId);
+        if (loaded.isEmpty()) {
+            log.warn("resume requested for unknown run {}", runId);
+            return;
+        }
+        RunSnapshot snapshot = loaded.get();
+        PipelineRun run = PipelineRun.restore(snapshot);
+
+        try {
+            Map<String, StepDefinition> stepDefs = new LinkedHashMap<>();
+            definition.steps().forEach(s -> stepDefs.put(s.id(), s));
+            Map<String, String> templateKeyOf = new LinkedHashMap<>();
+            for (StepDefinition def : definition.steps()) {
+                if (def instanceof PerTaskLoop loop) {
+                    reExpandIfAlreadyPassed(project, run, loop, stepDefs, templateKeyOf);
+                }
+            }
+
+            // FR-3.5's "read once at run start" boundary is this resume, not the original (now
+            // gone) process's bootstrap — there is nowhere the literal prompt text of that process
+            // could have survived a kill -9, so the current file is what this run's remainder
+            // executes with, going forward, from here.
+            Map<String, Path> promptPaths = new LinkedHashMap<>();
+            TemplateExpansion.collectPromptPaths(definition.steps(), "", promptPaths);
+            Map<String, String> promptSnapshots = new LinkedHashMap<>();
+            for (Map.Entry<String, Path> entry : promptPaths.entrySet()) {
+                promptSnapshots.put(entry.getKey(), readPromptFile(project.repositoryPath(), entry.getValue()));
+            }
+
+            MapVariableResolver.Builder resolverBuilder = MapVariableResolver.builder()
+                    .project("name", project.name())
+                    .project("repository", project.repositoryPath().toString())
+                    .feature("slug", snapshot.featureSlug());
+            project.paramValues().forEach(resolverBuilder::param);
+            VariableResolver resolver = resolverBuilder.build();
+
+            RunContext ctx = new RunContext(run, project, resolver, stepDefs, promptSnapshots);
+            ctx.templateKeyOf.putAll(templateKeyOf);
+            replayContext(ctx, stateStore.loadAudit(runId));
+
+            runs.put(runId, ctx);
+            audit(ctx, null, 0, "run.resumed", MAPPER.createObjectNode());
+            persistAndPublish(ctx);
+            advance(ctx);
+        } catch (RuntimeException ex) {
+            log.error("failed to resume run {}", runId, ex);
+            run.pause(RunHaltReason.ENGINE_ERROR);
+            RunContext failedCtx = new RunContext(run, project, MapVariableResolver.builder().build(), Map.of(), Map.of());
+            runs.put(runId, failedCtx);
+            persistAndPublish(failedCtx);
+            audit(failedCtx, null, 0, "run.paused",
+                    haltPayload(RunHaltReason.ENGINE_ERROR.name(), String.valueOf(ex.getMessage())));
+        }
+    }
+
+    /** Re-derives the runtime step instances a {@code per_task_loop} already unrolled and passed
+     * before the process died — the static {@link PipelineDefinition} alone has no record of
+     * them, but re-reading its own {@code task-plan.json} is deterministic (same file the run
+     * expanded from originally, modulo FR-3.5 drift, which retry/resume already warns about). */
+    private void reExpandIfAlreadyPassed(ProjectDefinition project, PipelineRun run, PerTaskLoop loop,
+                                          Map<String, StepDefinition> stepDefs, Map<String, String> templateKeyOf) {
+        if (!run.hasStep(loop.id()) || run.step(loop.id()).status() != StepStatus.PASSED) {
+            return;
+        }
+        List<String> taskIds;
+        try {
+            taskIds = readTaskIds(project.repositoryPath().resolve(loop.taskPlanJson()));
+        } catch (IOException ex) {
+            throw new UncheckedIOException("resume: failed to re-expand per_task_loop " + loop.id(), ex);
+        }
+        for (String taskId : taskIds) {
+            List<StepDefinition> expanded = TemplateExpansion.expandForTask(loop, taskId);
+            for (int i = 0; i < expanded.size(); i++) {
+                StepDefinition instance = expanded.get(i);
+                stepDefs.put(instance.id(), instance);
+                templateKeyOf.put(instance.id(), loop.id() + "/" + loop.template().get(i).id());
+            }
+        }
+    }
+
+    /** Reconstructs the in-memory-only bookkeeping {@link RunContext} normally accumulates live
+     * (gate answers, question answers, judge-accumulated errors) by replaying the persisted audit
+     * hash-chain — the one part of a run's history {@link RunSnapshot} itself does not carry. */
+    private void replayContext(RunContext ctx, List<AuditEvent> auditEvents) {
+        for (AuditEvent event : auditEvents) {
+            String stepId = event.stepId();
+            switch (event.type()) {
+                case "gate.answered" -> {
+                    JsonNode answer = event.payload().get("answer");
+                    if (stepId != null && answer != null && answer.isTextual()) {
+                        ctx.gateAnswers.put(stepId, answer.asText());
+                    }
+                }
+                case "questions.answered" -> {
+                    JsonNode answers = event.payload().get("answers");
+                    if (stepId != null && answers != null && answers.isObject()) {
+                        Map<String, String> answerMap = new LinkedHashMap<>();
+                        answers.fields().forEachRemaining(e -> answerMap.put(e.getKey(), e.getValue().asText()));
+                        ctx.lastAnswers.put(stepId, answerMap);
+                    }
+                }
+                case "judge.verdict" -> {
+                    JsonNode passed = event.payload().get("passed");
+                    JsonNode target = event.payload().get("targetStepId");
+                    if (target == null) {
+                        continue;
+                    }
+                    if (passed != null && passed.asBoolean(false)) {
+                        ctx.accumulatedErrors.remove(target.asText());
+                    } else {
+                        JsonNode detail = event.payload().get("detail");
+                        ctx.accumulatedErrors.computeIfAbsent(target.asText(), k -> new ArrayList<>())
+                                .add(detail == null ? "" : detail.asText());
+                    }
+                }
+                default -> { }
+            }
+        }
+    }
+
     private static ObjectNode runStartedPayload(String featureSlug, PipelineDefinition definition, List<String> stepIds) {
         ObjectNode payload = MAPPER.createObjectNode();
         payload.put("featureSlug", featureSlug);
@@ -264,14 +404,35 @@ public final class PipelineEngine implements AutoCloseable {
             log.warn("command for unknown run {}: {}", command.runId(), command);
             return;
         }
-        switch (command) {
-            case EngineCommand.StepCompleted c -> handleStepCompleted(ctx, c);
-            case EngineCommand.StepFailed c -> handleStepFailed(ctx, c);
-            case EngineCommand.GateAnswered c -> handleGateAnswered(ctx, c);
-            case EngineCommand.QuestionsAnswered c -> handleQuestionsAnswered(ctx, c);
-            case EngineCommand.CancelRun c -> handleCancelRun(ctx);
-            case EngineCommand.RetryStep c -> handleRetryStep(ctx, c);
+        // FR-11.4: an uncaught exception anywhere in a command handler must not just vanish into
+        // the actor-loop's own log-and-continue catch (PipelineEngine#runLoop) — the run it broke
+        // has to surface as PAUSED(engine-error) so recovery (FR-3.4) picks it up on restart.
+        try {
+            switch (command) {
+                case EngineCommand.StepCompleted c -> handleStepCompleted(ctx, c);
+                case EngineCommand.StepFailed c -> handleStepFailed(ctx, c);
+                case EngineCommand.GateAnswered c -> handleGateAnswered(ctx, c);
+                case EngineCommand.QuestionsAnswered c -> handleQuestionsAnswered(ctx, c);
+                case EngineCommand.CancelRun c -> handleCancelRun(ctx);
+                case EngineCommand.RetryStep c -> handleRetryStep(ctx, c);
+            }
+        } catch (RuntimeException ex) {
+            log.error("run {} command handling failed for {}", ctx.run.id(), command, ex);
+            if (ctx.run.status() == RunStatus.RUNNING) {
+                haltOnEngineError(ctx, stepIdOf(command), String.valueOf(ex.getMessage()));
+            }
         }
+    }
+
+    private static String stepIdOf(EngineCommand command) {
+        return switch (command) {
+            case EngineCommand.StepCompleted c -> c.stepId();
+            case EngineCommand.StepFailed c -> c.stepId();
+            case EngineCommand.GateAnswered c -> c.stepId();
+            case EngineCommand.QuestionsAnswered c -> c.stepId();
+            case EngineCommand.RetryStep c -> c.stepId();
+            case EngineCommand.CancelRun c -> null;
+        };
     }
 
     private void handleStepCompleted(RunContext ctx, EngineCommand.StepCompleted cmd) {
@@ -294,6 +455,7 @@ public final class PipelineEngine implements AutoCloseable {
             publish(new EngineEvent.QuestionsPending(ctx.run.id(), cmd.stepId(), cmd.pendingQuestions()));
         } else {
             sr.transitionTo(StepStatus.PASSED);
+            ctx.autoRetryCounts.remove(cmd.stepId());
             audit(ctx, cmd.stepId(), cmd.iteration(), "step.completed", MAPPER.createObjectNode());
             persistAndPublish(ctx);
         }
@@ -325,18 +487,55 @@ public final class PipelineEngine implements AutoCloseable {
         StepDefinition def = ctx.stepDefs.get(cmd.stepId());
         if (def instanceof JudgeStep judge) {
             handleJudgeOutcome(ctx, judge, sr, false, cmd.detail());
+            advance(ctx);
+            return;
+        }
+        audit(ctx, cmd.stepId(), cmd.iteration(), "step.failed", failedPayload(cmd.reason(), cmd.detail()));
+
+        // FR-11.2: auto-retry only the classes that are safe to blindly redo (a dropped stream,
+        // a flaky script) and only up to the step's own RetryPolicy count; anything else — and a
+        // class whose budget is already spent — falls through to the ordinary terminal FAILED
+        // that a human retries manually (T11 acceptance: second stream failure is terminal).
+        int maxRetries = autoRetryLimit(def, cmd.reason());
+        int spent = ctx.autoRetryCounts.getOrDefault(cmd.stepId(), 0);
+        if (maxRetries > spent) {
+            ctx.autoRetryCounts.put(cmd.stepId(), spent + 1);
+            audit(ctx, cmd.stepId(), cmd.iteration(), "step.retried", autoRetriedPayload(spent + 1, maxRetries));
+            warnIfPromptDrifted(ctx, def);
+            persistAndPublish(ctx);
+            dispatch(ctx, def);
         } else {
             sr.markFailed(cmd.reason());
-            audit(ctx, cmd.stepId(), cmd.iteration(), "step.failed", failedPayload(cmd.reason(), cmd.detail()));
             persistAndPublish(ctx);
         }
         advance(ctx);
+    }
+
+    private static int autoRetryLimit(StepDefinition def, FailureReason reason) {
+        return switch (def) {
+            case AgentStep a -> reason == FailureReason.STREAM ? a.retry().stream() : 0;
+            case ScriptStep s -> reason == FailureReason.SCRIPT ? s.retry().script() : 0;
+            default -> 0;
+        };
     }
 
     private static ObjectNode failedPayload(FailureReason reason, String detail) {
         ObjectNode payload = MAPPER.createObjectNode();
         payload.put("reason", reason.name());
         payload.put("detail", detail);
+        return payload;
+    }
+
+    private static ObjectNode retriedPayload(boolean auto) {
+        ObjectNode payload = MAPPER.createObjectNode();
+        payload.put("auto", auto);
+        return payload;
+    }
+
+    private static ObjectNode autoRetriedPayload(int attempt, int max) {
+        ObjectNode payload = retriedPayload(true);
+        payload.put("attempt", attempt);
+        payload.put("max", max);
         return payload;
     }
 
@@ -485,11 +684,52 @@ public final class PipelineEngine implements AutoCloseable {
             log.warn("retry requested for step {} that is not FAILED (status {})", cmd.stepId(), sr.status());
             return;
         }
+        if (sr.failureReason().map(FailureReason::blocksManualRetry).orElse(false)) {
+            log.warn("retry refused for step {} pending investigation (reason {})", cmd.stepId(), sr.failureReason());
+            return;
+        }
+        ctx.autoRetryCounts.remove(cmd.stepId());
+        StepDefinition def = ctx.stepDefs.get(cmd.stepId());
+        warnIfPromptDrifted(ctx, def);
         sr.transitionTo(StepStatus.READY);
-        audit(ctx, cmd.stepId(), sr.iteration(), "step.retried", MAPPER.createObjectNode());
+        audit(ctx, cmd.stepId(), sr.iteration(), "step.retried", retriedPayload(false));
         persistAndPublish(ctx);
-        dispatch(ctx, ctx.stepDefs.get(cmd.stepId()));
+        dispatch(ctx, def);
         advance(ctx);
+    }
+
+    /**
+     * FR-3.5 traceability row T-12: a retry (auto or manual) still executes with the prompt text
+     * snapshotted at run start — determinism within a run is non-negotiable — but if the file on
+     * disk has since changed, that is worth a loud warning in the timeline rather than a silent
+     * "why didn't my edit take effect".
+     */
+    private void warnIfPromptDrifted(RunContext ctx, StepDefinition def) {
+        if (!(def instanceof AgentStep step)) {
+            return;
+        }
+        String templateKey = ctx.templateKeyOf.getOrDefault(step.id(), step.id());
+        String snapshot = ctx.promptSnapshots.get(templateKey);
+        if (snapshot == null) {
+            return;
+        }
+        String current;
+        try {
+            current = readPromptFile(ctx.projectRoot, step.promptTemplate());
+        } catch (RuntimeException ex) {
+            return;
+        }
+        if (!snapshot.equals(current)) {
+            audit(ctx, step.id(), 0, "prompt.drift",
+                    promptDriftPayload(step.promptTemplate().toString(), snapshot, current));
+        }
+    }
+
+    private static ObjectNode promptDriftPayload(String path, String snapshot, String current) {
+        ObjectNode payload = MAPPER.createObjectNode();
+        payload.put("promptPath", path);
+        payload.put("diff", PromptDiff.summarize(snapshot, current));
+        return payload;
     }
 
     // ---- readiness ----------------------------------------------------------------------
@@ -835,7 +1075,11 @@ public final class PipelineEngine implements AutoCloseable {
     private void audit(RunContext ctx, String stepId, int iteration, String type, ObjectNode payload) {
         AuditEvent envelope = new AuditEvent(0, Instant.now(), ctx.run.id(), stepId, iteration, type, payload, "", "");
         long seq = stateStore.appendAudit(envelope);
-        if (stepId != null) {
+        // The audit *event* is always written regardless; attaching it to a step's own event
+        // list is best-effort — the generic actor-exception catch (FR-11.4) can end up here with
+        // a stepId that never resolved to a real step in the first place, and that must not
+        // itself become a second crash inside the very handler meant to contain the first one.
+        if (stepId != null && ctx.run.hasStep(stepId)) {
             ctx.run.step(stepId).recordEvent(new AuditRef(seq, type));
         }
     }

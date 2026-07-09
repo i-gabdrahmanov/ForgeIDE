@@ -149,7 +149,8 @@ final class PipelineParser {
             return null;
         }
         Duration timeout = parseDuration(node.get("timeout"), id, "timeout", DEFAULT_SCRIPT_TIMEOUT);
-        return new ScriptStep(id, dependsOn, command, timeout);
+        RetryPolicy retry = parseRetry(node.get("retry"), id);
+        return new ScriptStep(id, dependsOn, command, timeout, retry);
     }
 
     private StepDefinition parseJudge(JsonNode node, String id, List<String> dependsOn) {

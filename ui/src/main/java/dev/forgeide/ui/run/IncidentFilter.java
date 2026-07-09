@@ -2,8 +2,11 @@ package dev.forgeide.ui.run;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import dev.forgeide.core.audit.AuditEvent;
+import dev.forgeide.core.run.FailureReason;
 
+import java.util.Arrays;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * "Only incidents" predicate for the Timeline (SDD FR-7.6 acceptance: "фильтр «только инциденты»
@@ -14,7 +17,10 @@ import java.util.Set;
  */
 public final class IncidentFilter {
 
-    private static final Set<String> INCIDENT_FAILURE_REASONS = Set.of("SCOPE", "TAMPERED");
+    private static final Set<String> INCIDENT_FAILURE_REASONS = Arrays.stream(FailureReason.values())
+            .filter(FailureReason::blocksManualRetry)
+            .map(Enum::name)
+            .collect(Collectors.toUnmodifiableSet());
 
     private IncidentFilter() {
     }

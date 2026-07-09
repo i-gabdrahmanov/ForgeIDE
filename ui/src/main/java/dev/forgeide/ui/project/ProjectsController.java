@@ -11,12 +11,14 @@ import dev.forgeide.core.port.TileValidityChecker;
 import dev.forgeide.core.project.ProjectDefinition;
 import dev.forgeide.core.project.json.ProjectRegistry;
 import dev.forgeide.core.run.RunId;
+import dev.forgeide.core.run.RunSnapshot;
 import dev.forgeide.runtime.agent.CompositeAgentRuntime;
 import dev.forgeide.runtime.script.ScriptExecutor;
 import dev.forgeide.runtime.state.FileStateStore;
 import dev.forgeide.runtime.state.ProjectHash;
 import dev.forgeide.ui.canvas.PipelineCanvasView;
 import dev.forgeide.ui.run.RunEngineRegistry;
+import dev.forgeide.ui.run.RunHistoryDialog;
 import dev.forgeide.ui.run.RunView;
 import dev.forgeide.ui.run.StartRunDialog;
 import javafx.scene.Parent;
@@ -63,13 +65,49 @@ public final class ProjectsController {
     public void showDetail(ProjectDefinition project) {
         root.setCenter(new ProjectDetailView(project, checker,
                 () -> showForm(Optional.of(project)), this::showList, () -> showCanvas(project),
-                () -> showStartRun(project)));
+                () -> showStartRun(project), () -> showRunHistory(project)));
     }
 
     /** Feature-slug + readiness form (SDD FR-7.9's launch flow); "Start" hands off to {@link #showRun}. */
     public void showStartRun(ProjectDefinition project) {
         root.setCenter(new StartRunDialog(project, () -> showDetail(project),
                 (pipeline, featureSlug) -> showRun(project, pipeline, featureSlug)));
+    }
+
+    /**
+     * Entry point into a feature's run history independent of starting a new run (T11): lets the
+     * user find a run FR-3.4 recovery left with an interrupted step and resume it, without having
+     * to launch a brand new one first.
+     */
+    public void showRunHistory(ProjectDefinition project) {
+        Path pipelinePath = project.repositoryPath().resolve(".forgeide").resolve("pipeline.yaml");
+        if (!Files.isRegularFile(pipelinePath)) {
+            showCanvas(project); // reuses its own "no pipeline.yaml at ..." error banner
+            return;
+        }
+        PipelineYaml.ParseResult parsed = new PipelineYaml().parseLenient(pipelinePath);
+        if (parsed.definition().isEmpty()) {
+            showCanvas(project); // reuses its own parse-error banner
+            return;
+        }
+        PipelineDefinition pipeline = parsed.definition().get();
+        String projectHash = ProjectHash.of(project.repositoryPath());
+        StateStore stateStore = new FileStateStore(FileStateStore.defaultRoot(projectHash, pipeline.id()));
+        root.setCenter(new RunHistoryDialog(project, stateStore, () -> showDetail(project),
+                snapshot -> showResumedRun(project, pipeline, stateStore, snapshot)));
+    }
+
+    /** Reattaches a live {@link PipelineEngine} to a run persisted by an earlier process (T11
+     * FR-3.4) — e.g. one {@code StartupRecovery} just turned an abandoned step terminal. */
+    private void showResumedRun(ProjectDefinition project, PipelineDefinition pipeline, StateStore stateStore,
+                                 RunSnapshot snapshot) {
+        PipelineEngine engine = new PipelineEngine(stateStore, CompositeAgentRuntime.claudeAndGigacode(),
+                new ScriptExecutor());
+        RunId runId = snapshot.runId();
+        engine.resume(project, pipeline, runId);
+        engineRegistry.register(runId, engine);
+        root.setCenter(new RunView(engine, stateStore, project, pipeline, runId, snapshot.featureSlug(),
+                () -> showDetail(project)));
     }
 
     /**

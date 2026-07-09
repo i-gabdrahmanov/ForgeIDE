@@ -43,6 +43,11 @@ final class RunContext {
     /** Step id -> the most recent {@code pending_questions} answers, folded into its next re-run. */
     final Map<String, Map<String, String>> lastAnswers = new HashMap<>();
 
+    /** Step id -> auto-retries already spent against its {@link dev.forgeide.core.policy.RetryPolicy}
+     * (FR-11.2); reset on a PASSED transition or a manual retry, never persisted (a restart's own
+     * recovery pass — FR-3.4 — always turns an in-flight attempt into a terminal manual retry). */
+    final Map<String, Integer> autoRetryCounts = new HashMap<>();
+
     RunContext(PipelineRun run, ProjectDefinition project, VariableResolver resolver,
                Map<String, StepDefinition> stepDefs, Map<String, String> promptSnapshots) {
         this.run = run;
