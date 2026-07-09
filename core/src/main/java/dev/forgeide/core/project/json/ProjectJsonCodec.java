@@ -5,6 +5,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.forgeide.core.project.CriticalityProfile;
+import dev.forgeide.core.project.JiraProjectConfig;
+import dev.forgeide.core.project.OutwardConfig;
+import dev.forgeide.core.project.PrProvider;
+import dev.forgeide.core.project.PrRepoConfig;
 import dev.forgeide.core.project.ProjectDefinition;
 import dev.forgeide.core.project.ProjectId;
 import dev.forgeide.core.project.RuntimeBinding;
@@ -14,6 +18,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Maps {@link ProjectDefinition} onto the JSON tree stored in {@code ~/.forgeide/projects.json}
@@ -40,6 +45,25 @@ final class ProjectJsonCodec {
         node.put("criticality", project.criticality().name());
         ArrayNode runtimes = node.putArray("runtimes");
         project.runtimes().forEach(r -> runtimes.add(runtimeNode(r)));
+        node.set("outward", outwardNode(project.outward()));
+        return node;
+    }
+
+    private ObjectNode outwardNode(OutwardConfig outward) {
+        ObjectNode node = mapper.createObjectNode();
+        node.put("gitRemote", outward.gitRemote());
+        node.put("targetBranch", outward.targetBranch());
+        outward.pr().ifPresent(pr -> {
+            ObjectNode prNode = node.putObject("pr");
+            prNode.put("provider", pr.provider().name());
+            prNode.put("apiBaseUrl", pr.apiBaseUrl());
+            prNode.put("repoSlug", pr.repoSlug());
+        });
+        outward.jira().ifPresent(jira -> {
+            ObjectNode jiraNode = node.putObject("jira");
+            jiraNode.put("baseUrl", jira.baseUrl());
+            jiraNode.put("transitionName", jira.transitionName());
+        });
         return node;
     }
 
@@ -63,7 +87,27 @@ final class ProjectJsonCodec {
         CriticalityProfile criticality = CriticalityProfile.valueOf(text(node, "criticality"));
         List<RuntimeBinding> runtimes = new ArrayList<>();
         node.path("runtimes").forEach(n -> runtimes.add(runtimeFromNode(n)));
-        return new ProjectDefinition(id, name, repositoryPath, specPaths, paramValues, criticality, runtimes);
+        OutwardConfig outward = node.has("outward") ? outwardFromNode(node.get("outward")) : OutwardConfig.EMPTY;
+        return new ProjectDefinition(id, name, repositoryPath, specPaths, paramValues, criticality, runtimes, outward);
+    }
+
+    /** {@code outward} was added in T17; a registry file written before then simply has no such
+     * field, and {@link #fromNode} above already falls back to {@link OutwardConfig#EMPTY}. */
+    private OutwardConfig outwardFromNode(JsonNode node) {
+        String gitRemote = text(node, "gitRemote");
+        String targetBranch = text(node, "targetBranch");
+        Optional<PrRepoConfig> pr = Optional.empty();
+        if (node.has("pr")) {
+            JsonNode prNode = node.get("pr");
+            pr = Optional.of(new PrRepoConfig(PrProvider.valueOf(text(prNode, "provider")),
+                    text(prNode, "apiBaseUrl"), text(prNode, "repoSlug")));
+        }
+        Optional<JiraProjectConfig> jira = Optional.empty();
+        if (node.has("jira")) {
+            JsonNode jiraNode = node.get("jira");
+            jira = Optional.of(new JiraProjectConfig(text(jiraNode, "baseUrl"), text(jiraNode, "transitionName")));
+        }
+        return new OutwardConfig(gitRemote, targetBranch, pr, jira);
     }
 
     private RuntimeBinding runtimeFromNode(JsonNode node) {

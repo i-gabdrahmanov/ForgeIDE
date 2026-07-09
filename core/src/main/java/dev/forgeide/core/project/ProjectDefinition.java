@@ -24,8 +24,19 @@ public record ProjectDefinition(
         List<Path> specPaths,
         Map<String, String> paramValues,
         CriticalityProfile criticality,
-        List<RuntimeBinding> runtimes
+        List<RuntimeBinding> runtimes,
+        OutwardConfig outward
 ) {
+
+    /** Convenience for the common case of no {@code outward:} config (keeps older call sites
+     * terse, same pattern as {@code ScriptStep}'s retry-less constructor) — T17's outward steps
+     * still run (git_push against {@code origin}/{@code main}), but {@code create_pr}/{@code
+     * jira_*} refuse until a real {@link OutwardConfig} is set. */
+    public ProjectDefinition(ProjectId id, String name, Path repositoryPath, List<Path> specPaths,
+                              Map<String, String> paramValues, CriticalityProfile criticality,
+                              List<RuntimeBinding> runtimes) {
+        this(id, name, repositoryPath, specPaths, paramValues, criticality, runtimes, OutwardConfig.EMPTY);
+    }
 
     public ProjectDefinition {
         Objects.requireNonNull(id, "id");
@@ -38,6 +49,7 @@ public record ProjectDefinition(
         specPaths = List.copyOf(specPaths);
         paramValues = Map.copyOf(paramValues);
         runtimes = List.copyOf(runtimes);
+        outward = Objects.requireNonNullElse(outward, OutwardConfig.EMPTY);
 
         Set<String> seen = new HashSet<>();
         for (RuntimeBinding runtime : runtimes) {

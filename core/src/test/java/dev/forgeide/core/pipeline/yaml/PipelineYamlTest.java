@@ -65,6 +65,7 @@ class PipelineYamlTest {
         OutwardStep deliver = (OutwardStep) def.step("deliver");
         assertThat(deliver.actions()).containsExactly(OutwardAction.GIT_PUSH, OutwardAction.CREATE_PR);
         assertThat(deliver.envScope()).containsExactly("GIT_TOKEN");
+        assertThat(deliver.retry().script()).isZero(); // default materialised
     }
 
     @Test

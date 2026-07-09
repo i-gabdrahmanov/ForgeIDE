@@ -245,10 +245,11 @@ final class PipelineParser {
             }
         }
         List<String> envScope = textList(node.get("env_scope"), id, "env_scope");
+        RetryPolicy retry = parseRetry(node.get("retry"), id);
         if (actions.size() != raw.size()) {
             return null;
         }
-        return new OutwardStep(id, dependsOn, actions, envScope);
+        return new OutwardStep(id, dependsOn, actions, envScope, retry);
     }
 
     // ---- nested value objects ---------------------------------------------------------

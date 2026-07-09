@@ -72,6 +72,11 @@ final class RunContext {
      * {@link dev.forgeide.core.engine.PipelineEngine#handleGateAnswered} dispatches on this. */
     final Set<String> questionEscalations = new HashSet<>();
 
+    /** Outward step id -> the branch it pushed (T17), consulted so a later outward step's {@code
+     * create_pr} can stack its PR on top of an earlier one instead of always targeting the
+     * project's configured base branch. */
+    final Map<String, String> outwardBranches = new HashMap<>();
+
     RunContext(PipelineRun run, ProjectDefinition project, String pipelineId, VariableResolver resolver,
                Map<String, StepDefinition> stepDefs, Map<String, String> promptSnapshots) {
         this.run = run;

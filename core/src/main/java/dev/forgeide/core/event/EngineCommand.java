@@ -85,6 +85,20 @@ public sealed interface EngineCommand {
     record EvidenceObserved(RunId runId, String stepId, int iteration, ObjectNode payload) implements EngineCommand {
     }
 
+    /**
+     * T17: dispatch outcome for an {@code OutwardStep} — the branch it pushed (consulted by a
+     * later outward step's stacked-PR base resolution, {@code PipelineEngine#stackedPrBase}) and
+     * the external refs each action produced (PR URL, Jira comment id, …) for the audit trail /
+     * artifacts panel. Never emitted for a step that failed — that path is the ordinary {@link
+     * StepFailed} with {@link dev.forgeide.core.run.FailureReason#SCRIPT}.
+     */
+    record OutwardCompleted(RunId runId, String stepId, int iteration, String branch,
+                             Map<String, String> resultRefs) implements EngineCommand {
+        public OutwardCompleted {
+            resultRefs = Map.copyOf(resultRefs);
+        }
+    }
+
     record CancelRun(RunId runId) implements EngineCommand {
     }
 

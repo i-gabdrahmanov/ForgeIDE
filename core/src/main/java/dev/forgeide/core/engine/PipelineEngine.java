@@ -11,6 +11,7 @@ import dev.forgeide.core.pipeline.AgentStep;
 import dev.forgeide.core.pipeline.BranchStep;
 import dev.forgeide.core.pipeline.GateStep;
 import dev.forgeide.core.pipeline.JudgeStep;
+import dev.forgeide.core.pipeline.OutwardAction;
 import dev.forgeide.core.pipeline.OutwardStep;
 import dev.forgeide.core.pipeline.PerTaskLoop;
 import dev.forgeide.core.pipeline.PipelineDefinition;
@@ -21,6 +22,8 @@ import dev.forgeide.core.port.AgentResult;
 import dev.forgeide.core.port.AgentRuntimeException;
 import dev.forgeide.core.port.AgentRuntimePort;
 import dev.forgeide.core.port.ManifestProjectorPort;
+import dev.forgeide.core.port.OutwardActionException;
+import dev.forgeide.core.port.OutwardActionsPort;
 import dev.forgeide.core.port.ScopeDiffPort;
 import dev.forgeide.core.port.ScriptInvocation;
 import dev.forgeide.core.port.ScriptResult;
@@ -55,14 +58,18 @@ import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Deque;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -96,6 +103,7 @@ public final class PipelineEngine implements AutoCloseable {
     private final ManifestProjectorPort manifestProjector;
     private final ScopeDiffPort scopeDiff;
     private final SecretStorePort secretStore;
+    private final OutwardActionsPort outwardActions;
     private final ExecutorService workers;
 
     private final BlockingQueue<Runnable> mailbox = new LinkedBlockingQueue<>();
@@ -127,19 +135,34 @@ public final class PipelineEngine implements AutoCloseable {
     /** T16 scope-diff (SR-6) + env-scoping (SR-5), default {@code workers}. */
     public PipelineEngine(StateStore stateStore, AgentRuntimePort agentRuntime, ScriptRunnerPort scriptRunner,
                            ManifestProjectorPort manifestProjector, ScopeDiffPort scopeDiff, SecretStorePort secretStore) {
-        this(stateStore, agentRuntime, scriptRunner, manifestProjector, scopeDiff, secretStore,
-                Executors.newVirtualThreadPerTaskExecutor());
+        this(stateStore, agentRuntime, scriptRunner, manifestProjector, scopeDiff, secretStore, OutwardActionsPort.NOOP);
     }
 
     public PipelineEngine(StateStore stateStore, AgentRuntimePort agentRuntime, ScriptRunnerPort scriptRunner,
                            ManifestProjectorPort manifestProjector, ScopeDiffPort scopeDiff, SecretStorePort secretStore,
                            ExecutorService workers) {
+        this(stateStore, agentRuntime, scriptRunner, manifestProjector, scopeDiff, secretStore,
+                OutwardActionsPort.NOOP, workers);
+    }
+
+    /** T17 outward-actions (SR-4), default {@code workers}. */
+    public PipelineEngine(StateStore stateStore, AgentRuntimePort agentRuntime, ScriptRunnerPort scriptRunner,
+                           ManifestProjectorPort manifestProjector, ScopeDiffPort scopeDiff, SecretStorePort secretStore,
+                           OutwardActionsPort outwardActions) {
+        this(stateStore, agentRuntime, scriptRunner, manifestProjector, scopeDiff, secretStore, outwardActions,
+                Executors.newVirtualThreadPerTaskExecutor());
+    }
+
+    public PipelineEngine(StateStore stateStore, AgentRuntimePort agentRuntime, ScriptRunnerPort scriptRunner,
+                           ManifestProjectorPort manifestProjector, ScopeDiffPort scopeDiff, SecretStorePort secretStore,
+                           OutwardActionsPort outwardActions, ExecutorService workers) {
         this.stateStore = Objects.requireNonNull(stateStore, "stateStore");
         this.agentRuntime = Objects.requireNonNull(agentRuntime, "agentRuntime");
         this.scriptRunner = Objects.requireNonNull(scriptRunner, "scriptRunner");
         this.manifestProjector = Objects.requireNonNull(manifestProjector, "manifestProjector");
         this.scopeDiff = Objects.requireNonNull(scopeDiff, "scopeDiff");
         this.secretStore = Objects.requireNonNull(secretStore, "secretStore");
+        this.outwardActions = Objects.requireNonNull(outwardActions, "outwardActions");
         this.workers = Objects.requireNonNull(workers, "workers");
         this.actorThread = new Thread(this::runLoop, "forgeide-pipeline-engine");
         this.actorThread.setDaemon(true);
@@ -392,6 +415,12 @@ public final class PipelineEngine implements AutoCloseable {
                         ctx.lastAnswers.put(stepId, answerMap);
                     }
                 }
+                case "outward.result" -> {
+                    JsonNode branch = event.payload().get("branch");
+                    if (stepId != null && branch != null && branch.isTextual()) {
+                        ctx.outwardBranches.put(stepId, branch.asText());
+                    }
+                }
                 case "judge.verdict" -> {
                     JsonNode passed = event.payload().get("passed");
                     JsonNode target = event.payload().get("targetStepId");
@@ -453,6 +482,7 @@ public final class PipelineEngine implements AutoCloseable {
                 case EngineCommand.GateAnswered c -> handleGateAnswered(ctx, c);
                 case EngineCommand.QuestionsAnswered c -> handleQuestionsAnswered(ctx, c);
                 case EngineCommand.EvidenceObserved c -> handleEvidenceObserved(ctx, c);
+                case EngineCommand.OutwardCompleted c -> handleOutwardCompleted(ctx, c);
                 case EngineCommand.CancelRun c -> handleCancelRun(ctx);
                 case EngineCommand.RetryStep c -> handleRetryStep(ctx, c);
             }
@@ -471,6 +501,7 @@ public final class PipelineEngine implements AutoCloseable {
             case EngineCommand.GateAnswered c -> c.stepId();
             case EngineCommand.QuestionsAnswered c -> c.stepId();
             case EngineCommand.EvidenceObserved c -> c.stepId();
+            case EngineCommand.OutwardCompleted c -> c.stepId();
             case EngineCommand.RetryStep c -> c.stepId();
             case EngineCommand.CancelRun c -> null;
         };
@@ -600,6 +631,7 @@ public final class PipelineEngine implements AutoCloseable {
         return switch (def) {
             case AgentStep a -> reason == FailureReason.STREAM ? a.retry().stream() : 0;
             case ScriptStep s -> reason == FailureReason.SCRIPT ? s.retry().script() : 0;
+            case OutwardStep o -> reason == FailureReason.SCRIPT ? o.retry().script() : 0;
             default -> 0;
         };
     }
@@ -1330,15 +1362,171 @@ public final class PipelineEngine implements AutoCloseable {
         return ids;
     }
 
+    /**
+     * T17/SR-4: {@code outward} actions run here, on the engine's own worker thread — never
+     * inside an agent phase's process. Before touching anything external, re-checks (defense in
+     * depth, SD §4's "the engine has the final say", not just {@link
+     * dev.forgeide.core.pipeline.validation.PipelineValidator}'s load-time graph check) that
+     * every judge upstream of this step actually reached {@code PASSED}; a {@code SCOPE}/{@code
+     * TAMPERED} failure anywhere upstream can never reach here in the first place (those block
+     * manual retry — {@link FailureReason#blocksManualRetry}), so that half of the T17 scope
+     * note's precondition ("чистый scope-diff последней агент-фазы") is structural, not something
+     * this method can meaningfully re-verify on its own.
+     */
     private void dispatchOutward(RunContext ctx, OutwardStep outward) {
-        StepRun sr = ctx.run.step(outward.id());
-        sr.transitionTo(StepStatus.RUNNING);
-        sr.startIteration();
-        persistAndPublish(ctx);
-        // Real git/PR/Jira execution is T17; the engine only threads the step through to
-        // PASSED so the rest of the graph can progress end-to-end ahead of that adapter.
+        RunId runId = ctx.run.id();
+        int iteration = markRunning(ctx, outward.id());
+
+        Optional<String> unpassedJudge = firstUnpassedUpstreamJudge(ctx, outward);
+        if (unpassedJudge.isPresent()) {
+            submit(new EngineCommand.StepFailed(runId, outward.id(), iteration, FailureReason.JUDGE,
+                    "upstream judge not passed: " + unpassedJudge.get()));
+            return;
+        }
+
+        String branch = outwardBranch(ctx, outward);
+        String prBase = stackedPrBase(ctx, outward);
+        Map<String, String> env = secretStore.resolve(outward.envScope());
+        workers.execute(() -> {
+            try {
+                Map<String, String> resultRefs = new LinkedHashMap<>();
+                for (OutwardAction action : outward.actions()) {
+                    switch (action) {
+                        case GIT_PUSH -> resultRefs.putAll(runGitPush(ctx, outward, branch, env));
+                        case CREATE_PR -> resultRefs.putAll(runCreatePr(ctx, outward, branch, prBase, env));
+                        case JIRA_COMMENT -> resultRefs.putAll(runJiraComment(ctx, outward, resultRefs, env));
+                        case JIRA_TRANSITION -> resultRefs.putAll(runJiraTransition(ctx, outward, env));
+                    }
+                }
+                submit(new EngineCommand.OutwardCompleted(runId, outward.id(), iteration, branch, resultRefs));
+            } catch (OutwardActionException | RuntimeException ex) {
+                submit(new EngineCommand.StepFailed(runId, outward.id(), iteration, FailureReason.SCRIPT,
+                        String.valueOf(ex.getMessage())));
+            }
+        });
+    }
+
+    /** BFS over {@code dependsOn} (same shape as {@code PipelineValidator#upstreamJudge}, just
+     * over live {@link StepStatus} instead of the static graph) for the first judge that has not
+     * reached {@code PASSED}. Empty in the overwhelming common case — {@link #depsSatisfied}
+     * already guarantees every direct dependency is {@code PASSED} before {@link #dispatch} ever
+     * runs — this only ever fires if a future change loosens that guarantee. */
+    private Optional<String> firstUnpassedUpstreamJudge(RunContext ctx, StepDefinition outward) {
+        Set<String> seen = new HashSet<>();
+        Deque<String> queue = new ArrayDeque<>(outward.dependsOn());
+        while (!queue.isEmpty()) {
+            String id = queue.poll();
+            if (!seen.add(id)) {
+                continue;
+            }
+            StepDefinition step = ctx.stepDefs.get(id);
+            if (step == null) {
+                continue;
+            }
+            if (step instanceof JudgeStep && ctx.run.step(id).status() != StepStatus.PASSED) {
+                return Optional.of(id);
+            }
+            queue.addAll(step.dependsOn());
+        }
+        return Optional.empty();
+    }
+
+    /** Deterministic, per-outward-step branch name: stable across a retry (same commit, same
+     * branch — the entire idempotency argument for {@code git_push}/{@code create_pr}), unique
+     * across sibling outward steps in the same run (a {@code per_task_loop} can expand several). */
+    private static String outwardBranch(RunContext ctx, OutwardStep outward) {
+        return ctx.run.featureSlug() + "/" + outward.id();
+    }
+
+    /** T17 "stacked по depends_on": if an earlier outward step in this run's {@code dependsOn}
+     * closure already pushed a branch, {@code create_pr} bases on top of it instead of the
+     * project's single configured target branch — the stacked-PR pattern feature-pipeline's own
+     * multi-task delivery relies on. Falls back to {@link dev.forgeide.core.project.OutwardConfig#targetBranch()}
+     * when no such predecessor exists. */
+    private String stackedPrBase(RunContext ctx, OutwardStep outward) {
+        Set<String> seen = new HashSet<>();
+        Deque<String> queue = new ArrayDeque<>(outward.dependsOn());
+        while (!queue.isEmpty()) {
+            String id = queue.poll();
+            if (!seen.add(id)) {
+                continue;
+            }
+            String branch = ctx.outwardBranches.get(id);
+            if (branch != null) {
+                return branch;
+            }
+            StepDefinition step = ctx.stepDefs.get(id);
+            if (step == null) {
+                continue;
+            }
+            queue.addAll(step.dependsOn());
+        }
+        return ctx.project.outward().targetBranch();
+    }
+
+    private Map<String, String> runGitPush(RunContext ctx, OutwardStep outward, String branch,
+                                            Map<String, String> env) throws OutwardActionException {
+        String remote = ctx.project.outward().gitRemote();
+        String message = "forgeide: " + ctx.run.featureSlug() + " (" + outward.id() + ")";
+        var request = new OutwardActionsPort.GitPushRequest(ctx.projectRoot, remote, branch, message, env);
+        return outwardActions.gitPush(request).resultRefs();
+    }
+
+    private Map<String, String> runCreatePr(RunContext ctx, OutwardStep outward, String branch, String base,
+                                             Map<String, String> env) throws OutwardActionException {
+        var repo = ctx.project.outward().pr().orElseThrow(() -> new OutwardActionException(
+                "outward step '" + outward.id() + "': create_pr requires the project's outward.pr config"));
+        String title = "forgeide: " + ctx.run.featureSlug();
+        String body = "Automated delivery via ForgeIDE outward step '" + outward.id() + "' (run " + ctx.run.id() + ").";
+        var request = new OutwardActionsPort.CreatePrRequest(ctx.projectRoot, repo, branch, base, title, body, env);
+        return outwardActions.createPr(request).resultRefs();
+    }
+
+    private Map<String, String> runJiraComment(RunContext ctx, OutwardStep outward, Map<String, String> resultRefsSoFar,
+                                                Map<String, String> env) throws OutwardActionException {
+        var jira = ctx.project.outward().jira().orElseThrow(() -> new OutwardActionException(
+                "outward step '" + outward.id() + "': jira_comment requires the project's outward.jira config"));
+        String issueKey = ctx.resolver.render("${params.jira_key}");
+        String prUrl = resultRefsSoFar.get("pr_url");
+        String comment = "ForgeIDE: delivered run " + ctx.run.id() + " (" + ctx.run.featureSlug() + ")."
+                + (prUrl != null ? " PR: " + prUrl : "");
+        var request = new OutwardActionsPort.JiraCommentRequest(jira, issueKey, comment, env);
+        return outwardActions.jiraComment(request).resultRefs();
+    }
+
+    private Map<String, String> runJiraTransition(RunContext ctx, OutwardStep outward, Map<String, String> env)
+            throws OutwardActionException {
+        var jira = ctx.project.outward().jira().orElseThrow(() -> new OutwardActionException(
+                "outward step '" + outward.id() + "': jira_transition requires the project's outward.jira config"));
+        String issueKey = ctx.resolver.render("${params.jira_key}");
+        var request = new OutwardActionsPort.JiraTransitionRequest(jira, issueKey, env);
+        return outwardActions.jiraTransition(request).resultRefs();
+    }
+
+    private void handleOutwardCompleted(RunContext ctx, EngineCommand.OutwardCompleted cmd) {
+        if (ctx.run.status() != RunStatus.RUNNING) {
+            return;
+        }
+        StepRun sr = ctx.run.step(cmd.stepId());
+        if (sr.status() != StepStatus.RUNNING || sr.iteration() != cmd.iteration()) {
+            log.debug("stale OutwardCompleted for {} iter {} (current {} iter {})",
+                    cmd.stepId(), cmd.iteration(), sr.status(), sr.iteration());
+            return;
+        }
+        ctx.outwardBranches.put(cmd.stepId(), cmd.branch());
         sr.transitionTo(StepStatus.PASSED);
+        ctx.autoRetryCounts.remove(cmd.stepId());
+        audit(ctx, cmd.stepId(), cmd.iteration(), "outward.result", outwardResultPayload(cmd));
         persistAndPublish(ctx);
+        advance(ctx);
+    }
+
+    private static ObjectNode outwardResultPayload(EngineCommand.OutwardCompleted cmd) {
+        ObjectNode payload = MAPPER.createObjectNode();
+        payload.put("branch", cmd.branch());
+        ObjectNode refs = payload.putObject("resultRefs");
+        cmd.resultRefs().forEach(refs::put);
+        return payload;
     }
 
     private static String excerpt(String stderr, String stdout) {

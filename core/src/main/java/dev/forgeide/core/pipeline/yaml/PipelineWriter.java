@@ -147,6 +147,9 @@ final class PipelineWriter {
             actions.add(action.name().toLowerCase());
         }
         node.set("env_scope", strings(o.envScope()));
+        ObjectNode retry = node.putObject("retry");
+        retry.put("stream", o.retry().stream());
+        retry.put("script", o.retry().script());
     }
 
     // ---- helpers ----------------------------------------------------------------------
