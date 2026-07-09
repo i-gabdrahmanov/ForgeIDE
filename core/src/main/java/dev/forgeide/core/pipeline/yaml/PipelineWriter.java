@@ -119,6 +119,7 @@ final class PipelineWriter {
         node.put("question", g.question());
         node.set("options", strings(g.options()));
         putPaths(node, "show", g.showArtifacts());
+        node.put("risk", g.risk().name());
     }
 
     private void writeBranch(ObjectNode node, BranchStep b) {

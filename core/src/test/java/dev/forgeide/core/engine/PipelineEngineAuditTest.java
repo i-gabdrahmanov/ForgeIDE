@@ -186,6 +186,47 @@ class PipelineEngineAuditTest {
     }
 
     @Test
+    void judgeOverrideRecordsAMandatoryReasonVisibleInTheAudit(@TempDir Path repo) {
+        ScriptStep work = new ScriptStep("work", List.of(), List.of("run-target"), Duration.ofSeconds(5));
+        ScriptStep check = new ScriptStep("review.check", List.of(), List.of("check-target"), Duration.ofSeconds(5));
+        JudgeStep review = new JudgeStep("review", List.of("work"), "work",
+                Optional.empty(), Optional.of(check), new FailPolicy(1));
+        PipelineDefinition definition = new PipelineDefinition("p", 1, List.of(work, review));
+        InMemoryStateStore stateStore = new InMemoryStateStore();
+
+        FixtureScriptRunnerPort scriptRunner = new FixtureScriptRunnerPort(inv ->
+                inv.command().equals(List.of("run-target"))
+                        ? new ScriptResult(0, "ok", "")
+                        : new ScriptResult(1, "", "always fails"));
+
+        try (PipelineEngine engine = new PipelineEngine(stateStore, throwingAgent(), scriptRunner)) {
+            RunId runId = engine.start(TestProjects.minimal(repo), definition, "feature-x");
+            until(() -> engine.snapshot(runId).map(s -> statusOf(s, "review") == StepStatus.WAITING_GATE).orElse(false));
+
+            // Blank reason must be refused — no override audit entry, step still WAITING_GATE.
+            engine.submit(new EngineCommand.GateAnswered(runId, "review", "override", "tester", Instant.now(),
+                    Optional.of("")));
+            assertThat(statusOf(engine.snapshot(runId).orElseThrow(), "review")).isEqualTo(StepStatus.WAITING_GATE);
+            assertThat(stateStore.loadAudit(runId)).extracting(AuditEvent::type).doesNotContain("judge.overridden");
+
+            engine.submit(new EngineCommand.GateAnswered(runId, "review", "override", "tester", Instant.now(),
+                    Optional.of("hotfix window, shipping now")));
+
+            until(() -> engine.snapshot(runId).map(s -> statusOf(s, "review") == StepStatus.PASSED).orElse(false));
+            AuditEvent overridden = stateStore.loadAudit(runId).stream()
+                    .filter(e -> e.type().equals("judge.overridden")).findFirst().orElseThrow();
+            assertThat(overridden.stepId()).isEqualTo("work");
+            assertThat(overridden.payload().get("reason").asText()).isEqualTo("hotfix window, shipping now");
+            assertThat(overridden.payload().get("judgeStepId").asText()).isEqualTo("review");
+
+            AuditEvent answered = stateStore.loadAudit(runId).stream()
+                    .filter(e -> e.type().equals("gate.answered") && e.payload().has("detail"))
+                    .findFirst().orElseThrow();
+            assertThat(answered.payload().get("detail").asText()).isEqualTo("hotfix window, shipping now");
+        }
+    }
+
+    @Test
     void pendingQuestionsEmitAskedThenAnswered(@TempDir Path repo) throws IOException {
         Path promptDir = repo.resolve("prompts");
         Files.createDirectories(promptDir);

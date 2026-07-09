@@ -104,6 +104,12 @@ public final class StepRun {
         this.iteration++;
     }
 
+    /** FR-11.3 "reset chain" escalation action: clears the attempt count so the next retry gets
+     * a fresh {@code fail_policy.max_iterations} budget instead of one already exhausted. */
+    public void resetIteration() {
+        this.iteration = 0;
+    }
+
     public void recordVerdict(JudgeVerdict verdict) {
         verdicts.add(Objects.requireNonNull(verdict, "verdict"));
     }

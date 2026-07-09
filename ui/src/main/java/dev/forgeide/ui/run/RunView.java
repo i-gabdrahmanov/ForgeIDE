@@ -2,6 +2,7 @@ package dev.forgeide.ui.run;
 
 import dev.forgeide.core.audit.AuditEvent;
 import dev.forgeide.core.engine.PipelineEngine;
+import dev.forgeide.core.event.EngineEvent;
 import dev.forgeide.core.pipeline.PipelineDefinition;
 import dev.forgeide.core.pipeline.StepDefinition;
 import dev.forgeide.core.pipeline.validation.PipelineError;
@@ -28,9 +29,12 @@ import javafx.scene.control.TabPane;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.stage.FileChooser;
+import javafx.stage.Stage;
 import javafx.stage.Window;
 
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Optional;
 
@@ -53,6 +57,11 @@ public final class RunView extends BorderPane {
 
     private StepDefinition selectedStep;
     private int lastTargetIteration = -1;
+
+    /** Step id -> its latest unanswered gate/escalation request (T12: a dismissed dialog leaves
+     * the step {@code WAITING_GATE} — this is what a canvas re-selection reopens). */
+    private final Map<String, EngineEvent.GateRequest> pendingGates = new LinkedHashMap<>();
+    private final Map<String, Stage> openGateDialogs = new LinkedHashMap<>();
 
     public RunView(PipelineEngine engine, StateStore stateStore, ProjectDefinition project,
                    PipelineDefinition pipeline, RunId runId, String featureSlug, Runnable onBack) {
@@ -106,6 +115,9 @@ public final class RunView extends BorderPane {
             lastTargetIteration = -1;
             retargetLog();
             retry.setDisable(!isSelectedStepFailed());
+            if (step != null && pendingGates.containsKey(step.id())) {
+                openGateDialog(pendingGates.get(step.id()));
+            }
         });
 
         viewModel.snapshotProperty().addListener((obs, old, snapshot) -> {
@@ -119,8 +131,45 @@ public final class RunView extends BorderPane {
             cancel.setDisable(terminal);
             retry.setDisable(!isSelectedStepFailed());
             retargetLog();
+            prunePendingGates(snapshot);
         });
         Optional.ofNullable(viewModel.snapshotProperty().get()).ifPresent(canvas::applyRunSnapshot);
+
+        viewModel.onGateRequest(this::onGateRequest);
+    }
+
+    /** T12: opens (or focuses an already-open) dialog the moment the engine asks; the same
+     * request is kept so a later canvas click can reopen it if the human dismissed it. */
+    private void onGateRequest(EngineEvent.GateRequest request) {
+        pendingGates.put(request.stepId(), request);
+        openGateDialog(request);
+    }
+
+    private void openGateDialog(EngineEvent.GateRequest request) {
+        Stage existing = openGateDialogs.get(request.stepId());
+        if (existing != null) {
+            existing.toFront();
+            existing.requestFocus();
+            return;
+        }
+        Stage stage = GateDialog.show(request, project.repositoryPath(),
+                (answer, detail, diffAcked) -> {
+                    viewModel.answerGate(request.stepId(), answer, detail, diffAcked);
+                    pendingGates.remove(request.stepId());
+                    openGateDialogs.remove(request.stepId());
+                },
+                () -> openGateDialogs.remove(request.stepId()));
+        openGateDialogs.put(request.stepId(), stage);
+    }
+
+    /** A step that left {@code WAITING_GATE} (answered from this or another IDE instance, or
+     * cancelled) no longer needs a reopenable pending request. */
+    private void prunePendingGates(RunSnapshot snapshot) {
+        pendingGates.keySet().removeIf(stepId -> snapshot.steps().stream()
+                .filter(s -> s.stepId().equals(stepId))
+                .findFirst()
+                .map(s -> s.status() != StepStatus.WAITING_GATE)
+                .orElse(true));
     }
 
     /** {@code Retry step} is only ever enabled for the selected tile's own current status — the
@@ -204,5 +253,7 @@ public final class RunView extends BorderPane {
     public void dispose() {
         viewModel.dispose();
         stepLogView.dispose();
+        List.copyOf(openGateDialogs.values()).forEach(Stage::close);
+        openGateDialogs.clear();
     }
 }

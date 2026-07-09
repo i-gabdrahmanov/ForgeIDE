@@ -43,6 +43,10 @@ final class RunContext {
     /** Step id -> the most recent {@code pending_questions} answers, folded into its next re-run. */
     final Map<String, Map<String, String>> lastAnswers = new HashMap<>();
 
+    /** Target step id -> one-shot replacement prompt text from a judge escalation's {@code
+     * edit_prompt} action (FR-11.3); consumed (removed) the next time that step dispatches. */
+    final Map<String, String> promptOverrides = new HashMap<>();
+
     /** Step id -> auto-retries already spent against its {@link dev.forgeide.core.policy.RetryPolicy}
      * (FR-11.2); reset on a PASSED transition or a manual retry, never persisted (a restart's own
      * recovery pass — FR-3.4 — always turns an in-flight attempt into a terminal manual retry). */

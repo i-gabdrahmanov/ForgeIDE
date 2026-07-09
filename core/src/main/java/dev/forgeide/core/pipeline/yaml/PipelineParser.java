@@ -17,6 +17,7 @@ import dev.forgeide.core.pipeline.validation.PipelineError;
 import dev.forgeide.core.policy.FailPolicy;
 import dev.forgeide.core.policy.RetryPolicy;
 import dev.forgeide.core.policy.TokenBudget;
+import dev.forgeide.core.project.RiskLevel;
 
 import java.nio.file.Path;
 import java.time.Duration;
@@ -39,6 +40,8 @@ final class PipelineParser {
     private static final TokenBudget DEFAULT_BUDGET =
             new TokenBudget(2_000_000, Duration.ofMinutes(30), 512);
     private static final Duration DEFAULT_SCRIPT_TIMEOUT = Duration.ofMinutes(5);
+    /** Risk applied to gate steps that do not declare one (SDD FR-1.3/FR-5.3). */
+    private static final RiskLevel DEFAULT_GATE_RISK = RiskLevel.R1;
 
     private final List<PipelineError> errors = new ArrayList<>();
 
@@ -174,13 +177,26 @@ final class PipelineParser {
         String question = requireText(node, id, "question");
         List<String> options = textList(node.get("options"), id, "options");
         List<Path> show = pathList(node.get("show"), id, "show");
+        RiskLevel risk = parseRisk(node.get("risk"), id);
         if (options.isEmpty()) {
             errors.add(PipelineError.atStep(id, "options", "gate requires at least one option"));
         }
         if (question == null || options.isEmpty()) {
             return null;
         }
-        return new GateStep(id, dependsOn, question, options, show);
+        return new GateStep(id, dependsOn, question, options, show, risk);
+    }
+
+    private RiskLevel parseRisk(JsonNode node, String stepId) {
+        if (node == null || node.isNull()) {
+            return DEFAULT_GATE_RISK;
+        }
+        try {
+            return RiskLevel.valueOf(node.asText().toUpperCase());
+        } catch (IllegalArgumentException ex) {
+            errors.add(PipelineError.atStep(stepId, "risk", "unknown risk level '" + node.asText() + "'"));
+            return DEFAULT_GATE_RISK;
+        }
     }
 
     private StepDefinition parseBranch(JsonNode node, String id, List<String> dependsOn) {

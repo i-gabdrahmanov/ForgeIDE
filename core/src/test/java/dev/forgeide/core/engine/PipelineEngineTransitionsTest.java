@@ -77,6 +77,28 @@ class PipelineEngineTransitionsTest {
     }
 
     @Test
+    void r2RiskGateRejectsConfirmationWithoutTheDiffAckCheckbox(@TempDir Path repo) {
+        GateStep gate = new GateStep("gate", List.of(), "Ship it?", List.of("approve", "reject"), List.of(),
+                dev.forgeide.core.project.RiskLevel.R2);
+        PipelineDefinition definition = new PipelineDefinition("p", 1, List.of(gate));
+
+        try (PipelineEngine engine = engine(FixtureScriptRunnerPort.alwaysOk(), throwingAgent())) {
+            RunId runId = engine.start(TestProjects.minimal(repo), definition, "feature-x");
+            until(() -> engine.snapshot(runId).map(s -> statusOf(s, "gate") == StepStatus.WAITING_GATE).orElse(false));
+
+            // diffAcked defaults to false via the terse constructor — must be refused (FR-5.3).
+            engine.submit(new EngineCommand.GateAnswered(runId, "gate", "approve", "tester", Instant.now()));
+            assertThat(statusOf(engine.snapshot(runId).orElseThrow(), "gate")).isEqualTo(StepStatus.WAITING_GATE);
+
+            engine.submit(new EngineCommand.GateAnswered(runId, "gate", "approve", "tester", Instant.now(),
+                    Optional.empty(), true));
+
+            until(() -> engine.snapshot(runId).map(s -> s.status() == RunStatus.COMPLETED).orElse(false));
+            assertThat(statusOf(engine.snapshot(runId).orElseThrow(), "gate")).isEqualTo(StepStatus.PASSED);
+        }
+    }
+
+    @Test
     void gateAnswerOutsideItsOptionsIsIgnored(@TempDir Path repo) {
         GateStep gate = new GateStep("gate", List.of(), "Ship it?", List.of("approve", "reject"), List.of());
         PipelineDefinition definition = new PipelineDefinition("p", 1, List.of(gate));
@@ -200,6 +222,67 @@ class PipelineEngineTransitionsTest {
             // One extra attempt at "work", then the check fails again and it escalates again.
             until(() -> workRuns.get() >= 2);
             until(() -> engine.snapshot(runId).map(s -> statusOf(s, "review") == StepStatus.WAITING_GATE).orElse(false));
+        }
+    }
+
+    @Test
+    void judgeEscalationResetChainGivesAFreshIterationBudget(@TempDir Path repo) {
+        ScriptStep work = new ScriptStep("work", List.of(), List.of("run-target"), Duration.ofSeconds(5));
+        ScriptStep check = new ScriptStep("review.check", List.of(), List.of("check-target"), Duration.ofSeconds(5));
+        JudgeStep review = new JudgeStep("review", List.of("work"), "work",
+                Optional.empty(), Optional.of(check), new FailPolicy(2));
+        PipelineDefinition definition = new PipelineDefinition("p", 1, List.of(work, review));
+
+        AtomicInteger checkCalls = new AtomicInteger();
+        FixtureScriptRunnerPort scriptRunner = new FixtureScriptRunnerPort(inv ->
+                inv.command().equals(List.of("run-target"))
+                        ? new ScriptResult(0, "ok", "")
+                        : new ScriptResult(1, "", "fail #" + checkCalls.incrementAndGet()));
+
+        try (PipelineEngine engine = engine(scriptRunner, throwingAgent())) {
+            RunId runId = engine.start(TestProjects.minimal(repo), definition, "feature-x");
+            until(() -> engine.snapshot(runId).map(s -> statusOf(s, "review") == StepStatus.WAITING_GATE).orElse(false));
+            assertThat(checkCalls.get()).isEqualTo(2);
+
+            engine.submit(new EngineCommand.GateAnswered(runId, "review", "reset_chain", "tester", Instant.now()));
+
+            // A fresh 2-attempt budget needs two MORE failures, not one, before re-escalating —
+            // proof the iteration counter (not just accumulated_errors) was actually reset.
+            until(() -> engine.snapshot(runId).map(s -> statusOf(s, "review") == StepStatus.WAITING_GATE).orElse(false)
+                    && checkCalls.get() >= 4, 5_000);
+            assertThat(checkCalls.get()).isEqualTo(4);
+        }
+    }
+
+    @Test
+    void judgeEscalationOverrideRequiresANonBlankReasonThenForcesTargetAndDownstreamPassed(@TempDir Path repo) {
+        ScriptStep work = new ScriptStep("work", List.of(), List.of("run-target"), Duration.ofSeconds(5));
+        ScriptStep check = new ScriptStep("review.check", List.of(), List.of("check-target"), Duration.ofSeconds(5));
+        JudgeStep review = new JudgeStep("review", List.of("work"), "work",
+                Optional.empty(), Optional.of(check), new FailPolicy(1));
+        ScriptStep after = new ScriptStep("after", List.of("review"), List.of("after-target"), Duration.ofSeconds(5));
+        PipelineDefinition definition = new PipelineDefinition("p", 1, List.of(work, review, after));
+
+        FixtureScriptRunnerPort scriptRunner = new FixtureScriptRunnerPort(inv ->
+                inv.command().equals(List.of("check-target"))
+                        ? new ScriptResult(1, "", "always fails")
+                        : new ScriptResult(0, "ok", ""));
+
+        try (PipelineEngine engine = engine(scriptRunner, throwingAgent())) {
+            RunId runId = engine.start(TestProjects.minimal(repo), definition, "feature-x");
+            until(() -> engine.snapshot(runId).map(s -> statusOf(s, "review") == StepStatus.WAITING_GATE).orElse(false));
+
+            engine.submit(new EngineCommand.GateAnswered(runId, "review", "override", "tester", Instant.now(),
+                    Optional.of("   ")));
+            assertThat(statusOf(engine.snapshot(runId).orElseThrow(), "review")).isEqualTo(StepStatus.WAITING_GATE);
+
+            engine.submit(new EngineCommand.GateAnswered(runId, "review", "override", "tester", Instant.now(),
+                    Optional.of("hotfix window, shipping now")));
+
+            until(() -> engine.snapshot(runId).map(s -> s.status() == RunStatus.COMPLETED).orElse(false));
+            RunSnapshot snapshot = engine.snapshot(runId).orElseThrow();
+            assertThat(statusOf(snapshot, "review")).isEqualTo(StepStatus.PASSED);
+            assertThat(statusOf(snapshot, "after")).isEqualTo(StepStatus.PASSED);
         }
     }
 
