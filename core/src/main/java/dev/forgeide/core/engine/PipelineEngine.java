@@ -1090,11 +1090,22 @@ public final class PipelineEngine implements AutoCloseable {
                 StringBuilder detail = new StringBuilder();
                 if (judge.deterministicCheck().isPresent()) {
                     ScriptStep check = judge.deterministicCheck().get();
+                    // TODO(T18): SR-7 wants judge/preflight scripts run from the IDE harness cache
+                    // (~/.forgeide/harness-cache/<hash>/), not the project working copy, so a
+                    // compromised phase can't edit the very check that grades it. Until T18 builds
+                    // that cache, this resolves the command against the project root as-is.
                     List<String> command = check.command().stream().map(ctx.resolver::render).toList();
                     ScriptResult result = scriptRunner.run(
                             new ScriptInvocation(ctx.projectRoot, command, check.timeout(), Map.of()));
                     deterministicPassed = result.exitCode() == 0;
                     detail.append("check exit ").append(result.exitCode());
+                    // The exit code alone gives the agent nothing to act on for the next
+                    // iteration's accumulated_errors block (FR-4.5) — carry the check's own
+                    // diagnostic output too, since that is what actually names the problem.
+                    String output = !result.stderr().isBlank() ? result.stderr() : result.stdout();
+                    if (!output.isBlank()) {
+                        detail.append(": ").append(output.strip());
+                    }
                 }
                 if (judge.llmJudge().isPresent()) {
                     AgentStep llm = judge.llmJudge().get();

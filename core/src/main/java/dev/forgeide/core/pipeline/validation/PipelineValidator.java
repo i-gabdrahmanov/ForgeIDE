@@ -172,22 +172,35 @@ public final class PipelineValidator {
         return reachable;
     }
 
-    /** Each outward step must have a judge somewhere in its depends_on closure (SR-4, FR-6.1). */
+    /**
+     * Each outward step must have a judge somewhere in its depends_on closure, and that judge
+     * must carry a deterministic recheck — an LLM-only judge is advisory and cannot gate an
+     * outward step (SR-4, FR-6.1: "ОБЯЗАТЕЛЬНЫЙ детерминированный recheck для судей, блокирующих
+     * outward-шаги"; Т-8: the recheck, not the LLM verdict, is what a prompt-injected artifact
+     * cannot talk its way past).
+     */
     private void checkJudgeBeforeOutward(PipelineDefinition def, Map<String, StepDefinition> byId, List<PipelineError> errors) {
         for (StepDefinition step : def.steps()) {
             if (!(step instanceof OutwardStep)) {
                 continue;
             }
-            if (!hasUpstreamJudge(step, byId)) {
+            UpstreamJudge found = upstreamJudge(step, byId);
+            if (found == UpstreamJudge.NONE) {
                 errors.add(PipelineError.atStep(step.id(), "depends_on",
                         "outward step must be preceded by a judge"));
+            } else if (found == UpstreamJudge.WITHOUT_DETERMINISTIC_CHECK) {
+                errors.add(PipelineError.atStep(step.id(), "depends_on",
+                        "outward step's judge must have a deterministic check (LLM verdict alone cannot gate outward)"));
             }
         }
     }
 
-    private boolean hasUpstreamJudge(StepDefinition outward, Map<String, StepDefinition> byId) {
+    private enum UpstreamJudge { NONE, WITHOUT_DETERMINISTIC_CHECK, WITH_DETERMINISTIC_CHECK }
+
+    private UpstreamJudge upstreamJudge(StepDefinition outward, Map<String, StepDefinition> byId) {
         Set<String> seen = new HashSet<>();
         Deque<String> queue = new ArrayDeque<>(outward.dependsOn());
+        UpstreamJudge best = UpstreamJudge.NONE;
         while (!queue.isEmpty()) {
             String id = queue.poll();
             if (!seen.add(id)) {
@@ -197,12 +210,15 @@ public final class PipelineValidator {
             if (step == null) {
                 continue;
             }
-            if (step instanceof JudgeStep) {
-                return true;
+            if (step instanceof JudgeStep judge) {
+                if (judge.deterministicCheck().isPresent()) {
+                    return UpstreamJudge.WITH_DETERMINISTIC_CHECK;
+                }
+                best = UpstreamJudge.WITHOUT_DETERMINISTIC_CHECK;
             }
             queue.addAll(step.dependsOn());
         }
-        return false;
+        return best;
     }
 
     /** Every ${scope.key} must name a known scope; params must be declared. */
