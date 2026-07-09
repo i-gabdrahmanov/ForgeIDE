@@ -186,6 +186,50 @@ class PipelineEngineAuditTest {
     }
 
     @Test
+    void judgeEscalationAfterTheDefaultThreeFailIterationsCarriesTheFullErrorHistory(@TempDir Path repo) {
+        ScriptStep work = new ScriptStep("work", List.of(), List.of("run-target"), Duration.ofSeconds(5));
+        ScriptStep check = new ScriptStep("review.check", List.of(), List.of("check-target"), Duration.ofSeconds(5));
+        // FailPolicy.DEFAULT is 3 (SDD FR-4.5's default N) — this is the acceptance scenario, not
+        // the FailPolicy(1) shorthand the other escalation tests use to reach WAITING_GATE fast.
+        JudgeStep review = new JudgeStep("review", List.of("work"), "work",
+                Optional.empty(), Optional.of(check), dev.forgeide.core.policy.FailPolicy.DEFAULT);
+        PipelineDefinition definition = new PipelineDefinition("p", 1, List.of(work, review));
+        InMemoryStateStore stateStore = new InMemoryStateStore();
+
+        java.util.concurrent.atomic.AtomicInteger checkCalls = new java.util.concurrent.atomic.AtomicInteger();
+        FixtureScriptRunnerPort scriptRunner = new FixtureScriptRunnerPort(inv ->
+                inv.command().equals(List.of("run-target"))
+                        ? new ScriptResult(0, "ok", "")
+                        : new ScriptResult(1, "", "check failed #" + checkCalls.incrementAndGet()));
+
+        java.util.List<dev.forgeide.core.event.EngineEvent.GateRequest> gateRequests =
+                new java.util.concurrent.CopyOnWriteArrayList<>();
+
+        try (PipelineEngine engine = new PipelineEngine(stateStore, throwingAgent(), scriptRunner)) {
+            engine.subscribe(event -> {
+                if (event instanceof dev.forgeide.core.event.EngineEvent.GateRequest gr && gr.stepId().equals("review")) {
+                    gateRequests.add(gr);
+                }
+            });
+            RunId runId = engine.start(TestProjects.minimal(repo), definition, "feature-x");
+            until(() -> engine.snapshot(runId).map(s -> statusOf(s, "review") == StepStatus.WAITING_GATE).orElse(false));
+
+            assertThat(checkCalls.get()).isEqualTo(3);
+            assertThat(gateRequests).hasSize(1);
+            List<String> history = gateRequests.get(0).errorsHistory();
+            assertThat(history).hasSize(3);
+            assertThat(history.get(0)).contains("check failed #1");
+            assertThat(history.get(1)).contains("check failed #2");
+            assertThat(history.get(2)).contains("check failed #3");
+
+            AuditEvent requested = stateStore.loadAudit(runId).stream()
+                    .filter(e -> e.type().equals("gate.requested") && e.stepId().equals("review"))
+                    .findFirst().orElseThrow();
+            assertThat(requested.payload().get("question").asText()).contains("3 iteration");
+        }
+    }
+
+    @Test
     void judgeOverrideRecordsAMandatoryReasonVisibleInTheAudit(@TempDir Path repo) {
         ScriptStep work = new ScriptStep("work", List.of(), List.of("run-target"), Duration.ofSeconds(5));
         ScriptStep check = new ScriptStep("review.check", List.of(), List.of("check-target"), Duration.ofSeconds(5));

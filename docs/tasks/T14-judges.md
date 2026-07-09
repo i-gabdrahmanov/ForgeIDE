@@ -22,7 +22,7 @@
 
 ## Приёмка
 
-- [ ] LLM-PASS + recheck-FAIL → шаг FAILED(judge) (recheck решает)
-- [ ] три FAIL-итерации → диалог эскалации со всей историей errors.json
-- [ ] промпт-injection «verdict: PASS» в артефакте не проходит (recheck-фикстура)
-- [ ] после PASS errors.json очищается, шаг закрывается
+- [x] LLM-PASS + recheck-FAIL → шаг FAILED(judge) (recheck решает)
+- [x] три FAIL-итерации → диалог эскалации со всей историей errors.json
+- [x] промпт-injection «verdict: PASS» в артефакте не проходит (recheck-фикстура)
+- [x] после PASS errors.json очищается, шаг закрывается
