@@ -2,6 +2,7 @@ package dev.forgeide.core.event;
 
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.forgeide.core.run.FailureReason;
+import dev.forgeide.core.run.HarnessDriftAction;
 import dev.forgeide.core.run.PendingQuestion;
 import dev.forgeide.core.run.RunId;
 
@@ -96,6 +97,21 @@ public sealed interface EngineCommand {
                              Map<String, String> resultRefs) implements EngineCommand {
         public OutwardCompleted {
             resultRefs = Map.copyOf(resultRefs);
+        }
+    }
+
+    /**
+     * T18: resolves a run {@code STOPPED(harness-drift)} (SR-8) — a human either accepts the
+     * drifted harness content as the new baseline ({@link HarnessDriftAction#ACCEPT}) or restores
+     * it from the last known-good IDE harness cache ({@link HarnessDriftAction#ROLLBACK}).
+     * Ignored unless the run is currently stopped for exactly that reason.
+     *
+     * @param user who resolved it, {@code at} when — same "кто, когда" shape as {@link GateAnswered}.
+     */
+    record HarnessDriftResolved(RunId runId, HarnessDriftAction action, String user, Instant at) implements EngineCommand {
+        /** Convenience for call sites that don't care who/when (tests, internal replay). */
+        public HarnessDriftResolved(RunId runId, HarnessDriftAction action) {
+            this(runId, action, "unknown", Instant.now());
         }
     }
 

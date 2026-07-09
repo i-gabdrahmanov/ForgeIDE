@@ -101,6 +101,21 @@ public final class PipelineRun {
     }
 
     /**
+     * Clears a {@code PAUSED}/{@code STOPPED} halt and returns the run to {@code RUNNING},
+     * live within the same process — unlike {@link #restore}, which only ever replays a status a
+     * dead process already committed. First use: a human's "принять дифф"/"откатить" resolution
+     * of a {@code STOPPED(harness-drift)} run (SR-8, T18) — the engine only calls this after
+     * confirming {@link #haltReason()} is the one it knows how to resolve.
+     */
+    public void resume() {
+        if (status != RunStatus.PAUSED && status != RunStatus.STOPPED) {
+            throw new IllegalStateException("cannot resume from " + status);
+        }
+        this.status = RunStatus.RUNNING;
+        this.haltReason = null;
+    }
+
+    /**
      * Rehydrates a live {@code PipelineRun} from a persisted {@link RunSnapshot} (SDD FR-3.4:
      * engine resume after an IDE restart) — every step is restored exactly as recorded, including
      * one already turned {@code FAILED(interrupted)} by {@link RunRecovery}, rather than starting

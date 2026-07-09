@@ -9,5 +9,7 @@ public enum RunHaltReason {
     /** Harness hash-manifest drifted before an agent phase (SR-8). */
     HARNESS_DRIFT,
     /** Audit hash-chain broke on load (SR-3, FR-7.3). */
-    AUDIT_CHAIN
+    AUDIT_CHAIN,
+    /** Harness not deployed, or its last preflight did not pass (FR-1.4): "enforcement off". */
+    HARNESS_PREFLIGHT
 }

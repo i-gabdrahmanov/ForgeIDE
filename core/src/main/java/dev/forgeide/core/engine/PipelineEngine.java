@@ -21,6 +21,7 @@ import dev.forgeide.core.port.AgentInvocation;
 import dev.forgeide.core.port.AgentResult;
 import dev.forgeide.core.port.AgentRuntimeException;
 import dev.forgeide.core.port.AgentRuntimePort;
+import dev.forgeide.core.port.HarnessGuardPort;
 import dev.forgeide.core.port.ManifestProjectorPort;
 import dev.forgeide.core.port.OutwardActionException;
 import dev.forgeide.core.port.OutwardActionsPort;
@@ -37,6 +38,7 @@ import dev.forgeide.core.project.RuntimeBinding;
 import dev.forgeide.core.run.AuditRef;
 import dev.forgeide.core.run.EscalationAction;
 import dev.forgeide.core.run.FailureReason;
+import dev.forgeide.core.run.HarnessDriftAction;
 import dev.forgeide.core.run.JudgeVerdict;
 import dev.forgeide.core.run.PendingQuestion;
 import dev.forgeide.core.run.PipelineRun;
@@ -104,6 +106,7 @@ public final class PipelineEngine implements AutoCloseable {
     private final ScopeDiffPort scopeDiff;
     private final SecretStorePort secretStore;
     private final OutwardActionsPort outwardActions;
+    private final HarnessGuardPort harnessGuard;
     private final ExecutorService workers;
 
     private final BlockingQueue<Runnable> mailbox = new LinkedBlockingQueue<>();
@@ -150,12 +153,27 @@ public final class PipelineEngine implements AutoCloseable {
                            ManifestProjectorPort manifestProjector, ScopeDiffPort scopeDiff, SecretStorePort secretStore,
                            OutwardActionsPort outwardActions) {
         this(stateStore, agentRuntime, scriptRunner, manifestProjector, scopeDiff, secretStore, outwardActions,
-                Executors.newVirtualThreadPerTaskExecutor());
+                HarnessGuardPort.NOOP);
     }
 
     public PipelineEngine(StateStore stateStore, AgentRuntimePort agentRuntime, ScriptRunnerPort scriptRunner,
                            ManifestProjectorPort manifestProjector, ScopeDiffPort scopeDiff, SecretStorePort secretStore,
                            OutwardActionsPort outwardActions, ExecutorService workers) {
+        this(stateStore, agentRuntime, scriptRunner, manifestProjector, scopeDiff, secretStore, outwardActions,
+                HarnessGuardPort.NOOP, workers);
+    }
+
+    /** T18 harness-integrity (SR-7/SR-8), default {@code workers}. */
+    public PipelineEngine(StateStore stateStore, AgentRuntimePort agentRuntime, ScriptRunnerPort scriptRunner,
+                           ManifestProjectorPort manifestProjector, ScopeDiffPort scopeDiff, SecretStorePort secretStore,
+                           OutwardActionsPort outwardActions, HarnessGuardPort harnessGuard) {
+        this(stateStore, agentRuntime, scriptRunner, manifestProjector, scopeDiff, secretStore, outwardActions,
+                harnessGuard, Executors.newVirtualThreadPerTaskExecutor());
+    }
+
+    public PipelineEngine(StateStore stateStore, AgentRuntimePort agentRuntime, ScriptRunnerPort scriptRunner,
+                           ManifestProjectorPort manifestProjector, ScopeDiffPort scopeDiff, SecretStorePort secretStore,
+                           OutwardActionsPort outwardActions, HarnessGuardPort harnessGuard, ExecutorService workers) {
         this.stateStore = Objects.requireNonNull(stateStore, "stateStore");
         this.agentRuntime = Objects.requireNonNull(agentRuntime, "agentRuntime");
         this.scriptRunner = Objects.requireNonNull(scriptRunner, "scriptRunner");
@@ -163,6 +181,7 @@ public final class PipelineEngine implements AutoCloseable {
         this.scopeDiff = Objects.requireNonNull(scopeDiff, "scopeDiff");
         this.secretStore = Objects.requireNonNull(secretStore, "secretStore");
         this.outwardActions = Objects.requireNonNull(outwardActions, "outwardActions");
+        this.harnessGuard = Objects.requireNonNull(harnessGuard, "harnessGuard");
         this.workers = Objects.requireNonNull(workers, "workers");
         this.actorThread = new Thread(this::runLoop, "forgeide-pipeline-engine");
         this.actorThread.setDaemon(true);
@@ -269,6 +288,21 @@ public final class PipelineEngine implements AutoCloseable {
     private void bootstrap(RunId runId, ProjectDefinition project, PipelineDefinition definition, String featureSlug) {
         List<String> topLevelIds = definition.steps().stream().map(StepDefinition::id).toList();
         PipelineRun run = new PipelineRun(runId, featureSlug, topLevelIds);
+
+        // FR-1.4's GWT: "запуск прогонов заблокирован" until the harness has been deployed with a
+        // passing preflight — checked once, here, rather than per-phase like SR-8's drift check,
+        // since an undeployed harness has no baseline for drift to even compare against.
+        HarnessGuardPort.PreflightStatus preflight = harnessGuard.preflightStatus(project.repositoryPath());
+        if (!preflight.passed()) {
+            run.pause(RunHaltReason.HARNESS_PREFLIGHT);
+            RunContext haltedCtx = new RunContext(run, project, definition.id(), MapVariableResolver.builder().build(),
+                    Map.of(), Map.of());
+            runs.put(runId, haltedCtx);
+            persistAndPublish(haltedCtx);
+            audit(haltedCtx, null, 0, "run.paused",
+                    haltPayload(RunHaltReason.HARNESS_PREFLIGHT.name(), preflight.detail()));
+            return;
+        }
 
         Map<String, StepDefinition> stepDefs = new LinkedHashMap<>();
         definition.steps().forEach(s -> stepDefs.put(s.id(), s));
@@ -483,6 +517,7 @@ public final class PipelineEngine implements AutoCloseable {
                 case EngineCommand.QuestionsAnswered c -> handleQuestionsAnswered(ctx, c);
                 case EngineCommand.EvidenceObserved c -> handleEvidenceObserved(ctx, c);
                 case EngineCommand.OutwardCompleted c -> handleOutwardCompleted(ctx, c);
+                case EngineCommand.HarnessDriftResolved c -> handleHarnessDriftResolved(ctx, c);
                 case EngineCommand.CancelRun c -> handleCancelRun(ctx);
                 case EngineCommand.RetryStep c -> handleRetryStep(ctx, c);
             }
@@ -503,6 +538,7 @@ public final class PipelineEngine implements AutoCloseable {
             case EngineCommand.EvidenceObserved c -> c.stepId();
             case EngineCommand.OutwardCompleted c -> c.stepId();
             case EngineCommand.RetryStep c -> c.stepId();
+            case EngineCommand.HarnessDriftResolved c -> null;
             case EngineCommand.CancelRun c -> null;
         };
     }
@@ -1094,6 +1130,14 @@ public final class PipelineEngine implements AutoCloseable {
             haltOnEngineError(ctx, step.id(), "unknown runtime '" + step.runtimeRef() + "'");
             return;
         }
+        // SR-8: the project's harness hash-manifest is checked right before every agent phase,
+        // before the step even turns RUNNING — a prior phase editing e.g. tdd-guard.py must not
+        // let a second untrusted phase start before a human has seen the diff.
+        Optional<HarnessGuardPort.Drift> drift = harnessGuard.checkDrift(ctx.projectRoot);
+        if (drift.isPresent()) {
+            haltOnHarnessDrift(ctx, step.id(), drift.get());
+            return;
+        }
         RunId runId = ctx.run.id();
         int iteration = markRunning(ctx, step.id());
         // SD §4/T15: projected on the actor thread, before the phase starts — RunContext.run is
@@ -1209,6 +1253,18 @@ public final class PipelineEngine implements AutoCloseable {
         }
         RunId runId = ctx.run.id();
         int iteration = markRunning(ctx, judge.id());
+        // SR-7/Т-7 (P): a judge script path that resolves under the project's harness is
+        // redirected to the IDE's cache copy of the current baseline, so a compromised prior
+        // phase editing e.g. check_coverage.py has no effect on the verdict it grades. Resolved
+        // and audited here, on the actor thread, before the worker below even starts — fixed in
+        // the audit trail regardless of the check's own PASS/FAIL outcome.
+        Optional<List<String>> resolvedCommand = judge.deterministicCheck().map(check ->
+                harnessGuard.resolveFromCache(ctx.projectRoot,
+                        check.command().stream().map(ctx.resolver::render).toList()));
+        if (resolvedCommand.isPresent()) {
+            audit(ctx, judge.id(), iteration, "judge.script.resolved", judgeScriptResolvedPayload(resolvedCommand.get()));
+            persistAndPublish(ctx);
+        }
         RuntimeBinding finalLlmBinding = llmBinding;
         workers.execute(() -> {
             try {
@@ -1216,11 +1272,7 @@ public final class PipelineEngine implements AutoCloseable {
                 StringBuilder detail = new StringBuilder();
                 if (judge.deterministicCheck().isPresent()) {
                     ScriptStep check = judge.deterministicCheck().get();
-                    // TODO(T18): SR-7 wants judge/preflight scripts run from the IDE harness cache
-                    // (~/.forgeide/harness-cache/<hash>/), not the project working copy, so a
-                    // compromised phase can't edit the very check that grades it. Until T18 builds
-                    // that cache, this resolves the command against the project root as-is.
-                    List<String> command = check.command().stream().map(ctx.resolver::render).toList();
+                    List<String> command = resolvedCommand.orElseThrow();
                     ScriptResult result = scriptRunner.run(
                             new ScriptInvocation(ctx.projectRoot, command, check.timeout(), Map.of()));
                     deterministicPassed = result.exitCode() == 0;
@@ -1266,6 +1318,13 @@ public final class PipelineEngine implements AutoCloseable {
                         String.valueOf(ex.getMessage())));
             }
         });
+    }
+
+    private static ObjectNode judgeScriptResolvedPayload(List<String> command) {
+        ObjectNode payload = MAPPER.createObjectNode();
+        ArrayNode cmd = payload.putArray("command");
+        command.forEach(cmd::add);
+        return payload;
     }
 
     private static boolean isLlmPass(JsonNode finalJson) {
@@ -1320,6 +1379,57 @@ public final class PipelineEngine implements AutoCloseable {
         audit(ctx, stepId, 0, "incident.raised", failedPayload(FailureReason.SCRIPT, detail));
         persistAndPublish(ctx);
         publish(new EngineEvent.IncidentRaised(ctx.run.id(), stepId, FailureReason.SCRIPT, detail));
+    }
+
+    /**
+     * SR-8's GWT: stops the whole run — not just the step about to dispatch — the moment the
+     * project's harness hash-manifest no longer matches its last deployed/accepted baseline. The
+     * step itself is left exactly where {@link #advance} put it ({@code READY}, never {@code
+     * RUNNING}) so {@link #handleHarnessDriftResolved} can simply re-{@link #dispatch} it once a
+     * human has accepted or rolled back the diff — no different from how it would have started
+     * had drift never tripped.
+     */
+    private void haltOnHarnessDrift(RunContext ctx, String stepId, HarnessGuardPort.Drift drift) {
+        log.warn("run {} stopped: harness drift before step {}", ctx.run.id(), stepId);
+        ctx.harnessDriftStepId = stepId;
+        ctx.run.stop(RunHaltReason.HARNESS_DRIFT);
+        audit(ctx, stepId, ctx.run.step(stepId).iteration(), "run.stopped",
+                haltPayload(RunHaltReason.HARNESS_DRIFT.name(), drift.diff()));
+        persistAndPublish(ctx);
+    }
+
+    private void handleHarnessDriftResolved(RunContext ctx, EngineCommand.HarnessDriftResolved cmd) {
+        if (ctx.run.status() != RunStatus.STOPPED || ctx.run.haltReason().orElse(null) != RunHaltReason.HARNESS_DRIFT
+                || ctx.harnessDriftStepId == null) {
+            return;
+        }
+        String stepId = ctx.harnessDriftStepId;
+        int iteration = ctx.run.step(stepId).iteration();
+        switch (cmd.action()) {
+            case ACCEPT -> {
+                harnessGuard.acceptDrift(ctx.projectRoot);
+                audit(ctx, stepId, iteration, "harness.drift.accepted", harnessDriftResolvedPayload(cmd));
+            }
+            case ROLLBACK -> {
+                List<String> restored = harnessGuard.rollbackDrift(ctx.projectRoot);
+                ObjectNode payload = harnessDriftResolvedPayload(cmd);
+                ArrayNode restoredNode = payload.putArray("restored");
+                restored.forEach(restoredNode::add);
+                audit(ctx, stepId, iteration, "harness.drift.rolledback", payload);
+            }
+        }
+        ctx.harnessDriftStepId = null;
+        ctx.run.resume();
+        persistAndPublish(ctx);
+        dispatch(ctx, ctx.stepDefs.get(stepId));
+    }
+
+    private static ObjectNode harnessDriftResolvedPayload(EngineCommand.HarnessDriftResolved cmd) {
+        ObjectNode payload = MAPPER.createObjectNode();
+        payload.put("action", cmd.action().token());
+        payload.put("user", cmd.user());
+        payload.put("at", cmd.at().toString());
+        return payload;
     }
 
     private void dispatchPerTaskLoop(RunContext ctx, PerTaskLoop loop) {
