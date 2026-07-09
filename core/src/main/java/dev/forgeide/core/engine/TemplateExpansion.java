@@ -92,7 +92,7 @@ final class TemplateExpansion {
                         newRoutes.put(answer, remapIfLocal(target, loopId, taskId, localIds)));
                 yield new BranchStep(newId, newDeps, newRoutes);
             }
-            case OutwardStep o -> new OutwardStep(newId, newDeps, o.actions(), o.envScope());
+            case OutwardStep o -> new OutwardStep(newId, newDeps, o.actions(), o.envScope(), o.retry());
             // Id/deps are namespaced like any other step; the nested template itself is
             // expanded later, on its own terms, once this instance becomes ready.
             case PerTaskLoop nested -> new PerTaskLoop(newId, newDeps, nested.taskPlanJson(), nested.template());

@@ -1,6 +1,10 @@
 package dev.forgeide.core.project.json;
 
 import dev.forgeide.core.project.CriticalityProfile;
+import dev.forgeide.core.project.JiraProjectConfig;
+import dev.forgeide.core.project.OutwardConfig;
+import dev.forgeide.core.project.PrProvider;
+import dev.forgeide.core.project.PrRepoConfig;
 import dev.forgeide.core.project.ProjectDefinition;
 import dev.forgeide.core.project.ProjectId;
 import dev.forgeide.core.project.RuntimeBinding;
@@ -10,6 +14,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -65,6 +70,22 @@ class ProjectRegistryTest {
         registry.save(b);
 
         assertThat(registry.list()).containsExactlyInAnyOrder(a, b);
+    }
+
+    @Test
+    void persistsAndReloadsOutwardConfig(@TempDir Path dir) {
+        Path file = dir.resolve("projects.json");
+        OutwardConfig outward = new OutwardConfig("upstream", "release",
+                Optional.of(new PrRepoConfig(PrProvider.BITBUCKET, "https://api.bitbucket.org/2.0", "acme/demo")),
+                Optional.of(new JiraProjectConfig("https://acme.atlassian.net", "Done")));
+        ProjectDefinition project = new ProjectDefinition(ProjectId.newId(), "alpha", Path.of("/repo/alpha"),
+                List.of(), Map.of(), CriticalityProfile.LOW, List.of(), outward);
+        new ProjectRegistry(file).save(project);
+
+        ProjectRegistry reopened = new ProjectRegistry(file);
+
+        assertThat(reopened.find(project.id())).contains(project);
+        assertThat(reopened.find(project.id()).orElseThrow().outward()).isEqualTo(outward);
     }
 
     @Test
