@@ -5,6 +5,7 @@ import dev.forgeide.core.pipeline.validation.PipelineError;
 import dev.forgeide.core.pipeline.yaml.PipelineTemplates;
 import dev.forgeide.core.pipeline.yaml.PipelineYaml;
 import dev.forgeide.core.engine.PipelineEngine;
+import dev.forgeide.core.port.OutwardActionsPort;
 import dev.forgeide.core.port.RuntimeAvailabilityChecker;
 import dev.forgeide.core.port.StateStore;
 import dev.forgeide.core.port.TileValidityChecker;
@@ -14,6 +15,7 @@ import dev.forgeide.core.run.RunId;
 import dev.forgeide.core.run.RunSnapshot;
 import dev.forgeide.runtime.agent.CompositeAgentRuntime;
 import dev.forgeide.runtime.git.GitScopeDiff;
+import dev.forgeide.runtime.harness.DefaultHarnessGuard;
 import dev.forgeide.runtime.script.ScriptExecutor;
 import dev.forgeide.runtime.secret.FileSecretStore;
 import dev.forgeide.runtime.state.FileStateStore;
@@ -105,7 +107,8 @@ public final class ProjectsController {
     private void showResumedRun(ProjectDefinition project, PipelineDefinition pipeline, StateStore stateStore,
                                  RunSnapshot snapshot) {
         PipelineEngine engine = new PipelineEngine(stateStore, CompositeAgentRuntime.claudeAndGigacode(),
-                new ScriptExecutor(), new ManifestProjector(), new GitScopeDiff(), new FileSecretStore());
+                new ScriptExecutor(), new ManifestProjector(), new GitScopeDiff(), new FileSecretStore(),
+                OutwardActionsPort.NOOP, new DefaultHarnessGuard());
         RunId runId = snapshot.runId();
         engine.resume(project, pipeline, runId);
         engineRegistry.register(runId, engine);
@@ -123,7 +126,8 @@ public final class ProjectsController {
         String projectHash = ProjectHash.of(project.repositoryPath());
         StateStore stateStore = new FileStateStore(FileStateStore.defaultRoot(projectHash, pipeline.id()));
         PipelineEngine engine = new PipelineEngine(stateStore, CompositeAgentRuntime.claudeAndGigacode(),
-                new ScriptExecutor(), new ManifestProjector(), new GitScopeDiff(), new FileSecretStore());
+                new ScriptExecutor(), new ManifestProjector(), new GitScopeDiff(), new FileSecretStore(),
+                OutwardActionsPort.NOOP, new DefaultHarnessGuard());
         RunId runId = engine.start(project, pipeline, featureSlug);
         engineRegistry.register(runId, engine);
 

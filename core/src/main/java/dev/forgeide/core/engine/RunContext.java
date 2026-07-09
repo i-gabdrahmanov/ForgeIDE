@@ -1,6 +1,7 @@
 package dev.forgeide.core.engine;
 
 import dev.forgeide.core.pipeline.StepDefinition;
+import dev.forgeide.core.port.HarnessGuardPort;
 import dev.forgeide.core.project.ProjectDefinition;
 import dev.forgeide.core.run.PipelineRun;
 import dev.forgeide.core.vars.VariableResolver;
@@ -76,6 +77,13 @@ final class RunContext {
      * create_pr} can stack its PR on top of an earlier one instead of always targeting the
      * project's configured base branch. */
     final Map<String, String> outwardBranches = new HashMap<>();
+
+    /** The {@code AgentStep} whose pre-phase {@link HarnessGuardPort#checkDrift} tripped, while
+     * the run sits {@code STOPPED(harness-drift)} (SR-8, T18) — {@code null} otherwise. Only ever
+     * one at a time: a harness-drift stop halts the whole run, so no other step can be dispatching
+     * concurrently. Set right before {@code PipelineEngine#haltOnHarnessDrift}, consumed by
+     * {@code PipelineEngine#handleHarnessDriftResolved} to re-dispatch the same step once resolved. */
+    String harnessDriftStepId;
 
     RunContext(PipelineRun run, ProjectDefinition project, String pipelineId, VariableResolver resolver,
                Map<String, StepDefinition> stepDefs, Map<String, String> promptSnapshots) {
