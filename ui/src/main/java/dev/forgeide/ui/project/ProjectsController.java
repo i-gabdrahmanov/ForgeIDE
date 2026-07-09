@@ -15,6 +15,7 @@ import dev.forgeide.core.run.RunSnapshot;
 import dev.forgeide.runtime.agent.CompositeAgentRuntime;
 import dev.forgeide.runtime.script.ScriptExecutor;
 import dev.forgeide.runtime.state.FileStateStore;
+import dev.forgeide.runtime.state.ManifestProjector;
 import dev.forgeide.runtime.state.ProjectHash;
 import dev.forgeide.ui.canvas.PipelineCanvasView;
 import dev.forgeide.ui.run.RunEngineRegistry;
@@ -102,7 +103,7 @@ public final class ProjectsController {
     private void showResumedRun(ProjectDefinition project, PipelineDefinition pipeline, StateStore stateStore,
                                  RunSnapshot snapshot) {
         PipelineEngine engine = new PipelineEngine(stateStore, CompositeAgentRuntime.claudeAndGigacode(),
-                new ScriptExecutor());
+                new ScriptExecutor(), new ManifestProjector());
         RunId runId = snapshot.runId();
         engine.resume(project, pipeline, runId);
         engineRegistry.register(runId, engine);
@@ -120,7 +121,7 @@ public final class ProjectsController {
         String projectHash = ProjectHash.of(project.repositoryPath());
         StateStore stateStore = new FileStateStore(FileStateStore.defaultRoot(projectHash, pipeline.id()));
         PipelineEngine engine = new PipelineEngine(stateStore, CompositeAgentRuntime.claudeAndGigacode(),
-                new ScriptExecutor());
+                new ScriptExecutor(), new ManifestProjector());
         RunId runId = engine.start(project, pipeline, featureSlug);
         engineRegistry.register(runId, engine);
 
