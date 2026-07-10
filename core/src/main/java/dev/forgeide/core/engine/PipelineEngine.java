@@ -540,6 +540,8 @@ public final class PipelineEngine implements AutoCloseable {
                 case EngineCommand.HarnessDriftResolved c -> handleHarnessDriftResolved(ctx, c);
                 case EngineCommand.CancelRun c -> handleCancelRun(ctx);
                 case EngineCommand.RetryStep c -> handleRetryStep(ctx, c);
+                case EngineCommand.PromptEdited c -> handlePromptEdited(ctx, c);
+                case EngineCommand.HarnessEdited c -> handleHarnessEdited(ctx, c);
             }
         } catch (RuntimeException ex) {
             log.error("run {} command handling failed for {}", ctx.run.id(), command, ex);
@@ -559,7 +561,9 @@ public final class PipelineEngine implements AutoCloseable {
             case EngineCommand.OrphanProcessesSwept c -> c.stepId();
             case EngineCommand.OutwardCompleted c -> c.stepId();
             case EngineCommand.RetryStep c -> c.stepId();
+            case EngineCommand.PromptEdited c -> c.stepId();
             case EngineCommand.HarnessDriftResolved c -> null;
+            case EngineCommand.HarnessEdited c -> null;
             case EngineCommand.CancelRun c -> null;
         };
     }
@@ -1069,6 +1073,92 @@ public final class PipelineEngine implements AutoCloseable {
         payload.put("promptPath", path);
         payload.put("diff", PromptDiff.summarize(snapshot, current));
         return payload;
+    }
+
+    /**
+     * T20/FR-8.2 trusted-path counterpart to {@link #warnIfPromptDrifted}: unlike a drift
+     * warning, this one actually takes effect — it writes {@code cmd.content()} to the prompt
+     * file and updates {@link RunContext#promptSnapshots} under the same {@code templateKey}
+     * {@link #warnIfPromptDrifted}/dispatch already use, so the step's *next* dispatch (re-run,
+     * judge retry, manual retry) picks it up. A currently {@code RUNNING} iteration already
+     * captured its own prompt text at dispatch time and is left alone — that is the entire
+     * "next step run only" guarantee, no extra bookkeeping needed.
+     */
+    private void handlePromptEdited(RunContext ctx, EngineCommand.PromptEdited cmd) {
+        StepDefinition def = ctx.stepDefs.get(cmd.stepId());
+        Path promptTemplate;
+        String templateKey;
+        if (def instanceof AgentStep agent) {
+            promptTemplate = agent.promptTemplate();
+            templateKey = ctx.templateKeyOf.getOrDefault(agent.id(), agent.id());
+        } else if (def instanceof JudgeStep judge && judge.llmJudge().isPresent()) {
+            AgentStep llm = judge.llmJudge().get();
+            promptTemplate = llm.promptTemplate();
+            templateKey = llm.id();
+        } else {
+            log.warn("prompt edit for {} rejected: not an agent/llm-judge step", cmd.stepId());
+            return;
+        }
+        String previous = ctx.promptSnapshots.get(templateKey);
+        Path target = ctx.projectRoot.resolve(promptTemplate);
+        try {
+            Files.createDirectories(target.getParent());
+            Files.writeString(target, cmd.content());
+        } catch (IOException e) {
+            throw new UncheckedIOException("failed to write prompt template: " + promptTemplate, e);
+        }
+        ctx.promptSnapshots.put(templateKey, cmd.content());
+        int iteration = ctx.run.hasStep(cmd.stepId()) ? ctx.run.step(cmd.stepId()).iteration() : 0;
+        audit(ctx, cmd.stepId(), iteration, "prompt.edited",
+                promptEditedPayload(promptTemplate.toString(), previous == null ? "" : previous, cmd));
+    }
+
+    private static ObjectNode promptEditedPayload(String path, String previous, EngineCommand.PromptEdited cmd) {
+        ObjectNode payload = MAPPER.createObjectNode();
+        payload.put("promptPath", path);
+        payload.put("user", cmd.user());
+        payload.put("at", cmd.at().toString());
+        payload.put("diffHash", sha256Hex(cmd.content()));
+        payload.put("diff", PromptDiff.summarize(previous, cmd.content()));
+        return payload;
+    }
+
+    /**
+     * T20/FR-8.3: the tile inspector's trusted path for a judge/hook script — routes through
+     * {@link HarnessGuardPort#edit} (T18) so the save itself becomes the new baseline instead of
+     * ever registering as {@code STOPPED(harness-drift)} (SR-8); an edit that bypasses this
+     * command remains drift, caught the ordinary way before the next agent phase.
+     */
+    private void handleHarnessEdited(RunContext ctx, EngineCommand.HarnessEdited cmd) {
+        HarnessGuardPort.HarnessEditResult result =
+                harnessGuard.edit(ctx.projectRoot, cmd.relativePath(), cmd.content());
+        audit(ctx, null, 0, "harness.edited", harnessEditedPayload(result, cmd));
+    }
+
+    private static ObjectNode harnessEditedPayload(HarnessGuardPort.HarnessEditResult result,
+                                                     EngineCommand.HarnessEdited cmd) {
+        ObjectNode payload = MAPPER.createObjectNode();
+        payload.put("relativePath", cmd.relativePath());
+        payload.put("oldHash", result.oldHash());
+        payload.put("newHash", result.newHash());
+        payload.put("diff", result.diff());
+        payload.put("user", cmd.user());
+        payload.put("at", cmd.at().toString());
+        return payload;
+    }
+
+    private static String sha256Hex(String text) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder(digest.length * 2);
+            for (byte b : digest) {
+                hex.append(String.format("%02x", b));
+            }
+            return hex.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 unavailable", e);
+        }
     }
 
     // ---- readiness ----------------------------------------------------------------------

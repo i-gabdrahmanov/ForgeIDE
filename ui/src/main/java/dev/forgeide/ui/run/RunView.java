@@ -18,6 +18,8 @@ import dev.forgeide.core.run.StepStatus;
 import dev.forgeide.runtime.git.GitScopeDiff;
 import dev.forgeide.runtime.state.RunExporter;
 import dev.forgeide.ui.canvas.CanvasView;
+import dev.forgeide.ui.editor.HarnessPaths;
+import dev.forgeide.ui.editor.TileEditorPanel;
 import javafx.application.Platform;
 import javafx.geometry.Insets;
 import javafx.geometry.Orientation;
@@ -35,6 +37,10 @@ import javafx.stage.FileChooser;
 import javafx.stage.Stage;
 import javafx.stage.Window;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -52,6 +58,7 @@ public final class RunView extends BorderPane {
     private final RunViewModel viewModel;
     private final StepLogView stepLogView;
     private final CanvasView canvas;
+    private final TileEditorPanel inspector;
     private final PipelineDefinition pipeline;
     private final RunExporter exporter = new RunExporter();
     private final GitScopeDiff scopeDiff = new GitScopeDiff();
@@ -85,10 +92,25 @@ public final class RunView extends BorderPane {
         TimelineView timelineView = new TimelineView(stateStore, runId, this::showLog);
         timelineView.bindTo(viewModel.snapshotProperty());
         RunListView historyView = new RunListView(stateStore, featureSlug);
+        // T20/FR-8.2-8.3: mid-run saves always route through the live engine (never a direct
+        // write) so a prompt edit gets the "next dispatch only" + audit treatment, and a harness
+        // script edit becomes the new trusted baseline instead of registering as drift. A script
+        // outside the harness has no such determinism/drift concern (never snapshotted by the
+        // engine, read fresh off disk by ScriptExecutor every time) so it writes straight through.
+        inspector = new TileEditorPanel(project.repositoryPath(),
+                (stepId, absolutePath, content) -> viewModel.editPrompt(stepId, content),
+                (relativePath, content) -> {
+                    if (HarnessPaths.isUnderHarness(relativePath)) {
+                        viewModel.editHarness(HarnessPaths.harnessRelative(relativePath), content);
+                    } else {
+                        writeDirect(project.repositoryPath().resolve(relativePath), content);
+                    }
+                });
 
         TabPane bottom = new TabPane(
                 new Tab("Timeline", timelineView),
                 new Tab("Step log", stepLogView),
+                new Tab("Inspector", inspector),
                 new Tab("Run history", historyView));
         bottom.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
 
@@ -129,6 +151,11 @@ public final class RunView extends BorderPane {
             retargetLog();
             retry.setDisable(!isSelectedStepFailed());
             rollback.setDisable(!isSelectedStepScopeViolation());
+            if (step == null) {
+                inspector.showEmpty();
+            } else {
+                inspector.show(step, List.of(), TileValidityChecker.unknown().check(step));
+            }
             if (step != null && pendingGates.containsKey(step.id())) {
                 openGateDialog(pendingGates.get(step.id()));
             }
@@ -335,6 +362,17 @@ public final class RunView extends BorderPane {
                 Platform.runLater(() -> info("Export failed", String.valueOf(ex.getMessage())));
             }
         });
+    }
+
+    private static void writeDirect(Path absolute, String content) {
+        try {
+            if (absolute.getParent() != null) {
+                Files.createDirectories(absolute.getParent());
+            }
+            Files.writeString(absolute, content);
+        } catch (IOException e) {
+            throw new UncheckedIOException("failed to write " + absolute, e);
+        }
     }
 
     private void info(String title, String message) {

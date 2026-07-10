@@ -23,6 +23,11 @@ public final class FixtureHarnessGuardPort implements HarnessGuardPort {
     public final AtomicInteger acceptCalls = new AtomicInteger();
     public final AtomicInteger rollbackCalls = new AtomicInteger();
     public final List<List<String>> resolvedCommands = new CopyOnWriteArrayList<>();
+    public final List<EditCall> editCalls = new CopyOnWriteArrayList<>();
+
+    /** T20/FR-8.3: what a {@code HarnessGuardPort#edit} caller actually asked for. */
+    public record EditCall(Path projectRoot, String relativePath, String content) {
+    }
 
     @Override
     public DeployResult deploy(Path projectRoot) {
@@ -61,6 +66,7 @@ public final class FixtureHarnessGuardPort implements HarnessGuardPort {
 
     @Override
     public HarnessEditResult edit(Path projectRoot, String relativePath, String content) {
+        editCalls.add(new EditCall(projectRoot, relativePath, content));
         return new HarnessEditResult("old-hash", "new-hash", "~ modified: " + relativePath + "\n");
     }
 }
