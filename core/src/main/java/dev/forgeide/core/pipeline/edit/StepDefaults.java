@@ -24,9 +24,15 @@ import java.util.Optional;
  * What a fresh tile dropped from the T22 palette looks like (FR-2.5: "перетаскивание на канвас
  * создаёт шаг"). Every default satisfies its record's own constructor invariants (a {@code
  * GateStep} needs an option, a {@code JudgeStep} needs a check-or-llm, …) but is otherwise
- * deliberately incomplete — an empty prompt path, a target that names no real step — so the
- * live validator (FR-2.6) immediately badges the tile until the user fills it in, exactly like
- * the GWT in the task's acceptance criteria.
+ * deliberately incomplete — a target that names no real step — so the live validator (FR-2.6)
+ * immediately badges the tile until the user fills it in, exactly like the GWT in the task's
+ * acceptance criteria.
+ *
+ * <p>T23/FR-2.8 exception: a fresh {@code AgentStep} already points at a real
+ * {@code prompts/<id>.md} — this class is pure (no I/O), so the file itself does not exist yet
+ * until the caller also seeds it (see {@link AgentPromptScaffold}, wired in by {@code
+ * ConstructorCanvasView}'s new-agent hook right after this runs) — until then the live validator
+ * correctly badges the tile with "prompt file not found", same as any other incomplete default.
  */
 public final class StepDefaults {
 
@@ -37,8 +43,8 @@ public final class StepDefaults {
 
     public static StepDefinition create(StepKind kind, String id) {
         return switch (kind) {
-            case AGENT -> new AgentStep(id, List.of(), "claude", Path.of(""), List.of(), List.of(), List.of(),
-                    RetryPolicy.DEFAULT, TokenBudget.DEFAULT);
+            case AGENT -> new AgentStep(id, List.of(), "claude", Path.of("prompts", id + ".md"), List.of(), List.of(),
+                    List.of(), RetryPolicy.DEFAULT, TokenBudget.DEFAULT);
             case SCRIPT -> new ScriptStep(id, List.of(), List.of("echo", "todo"), DEFAULT_SCRIPT_TIMEOUT,
                     RetryPolicy.DEFAULT);
             case JUDGE -> {

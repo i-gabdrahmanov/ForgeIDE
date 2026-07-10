@@ -1,9 +1,16 @@
 package dev.forgeide.ui.canvas;
 
+import dev.forgeide.core.pipeline.AgentStep;
 import dev.forgeide.core.pipeline.PipelineDefinition;
 import dev.forgeide.core.pipeline.StepDefinition;
+import dev.forgeide.core.pipeline.edit.AgentPromptScaffold;
 import dev.forgeide.core.pipeline.edit.PipelineDocument;
 import dev.forgeide.core.pipeline.edit.PipelineEdits;
+import dev.forgeide.core.pipeline.library.LibraryTile;
+import dev.forgeide.core.pipeline.library.LibraryTileIds;
+import dev.forgeide.core.pipeline.library.LibraryTileInsertion;
+import dev.forgeide.core.pipeline.library.LibraryTileMetadata;
+import dev.forgeide.core.pipeline.library.TileLibraryStore;
 import dev.forgeide.core.pipeline.validation.PipelineError;
 import dev.forgeide.core.pipeline.validation.PipelineValidator;
 import dev.forgeide.core.pipeline.yaml.PipelineYaml;
@@ -11,6 +18,9 @@ import dev.forgeide.core.port.HarnessGuardPort;
 import dev.forgeide.core.port.TileValidityChecker;
 import dev.forgeide.ui.editor.HarnessPaths;
 import dev.forgeide.ui.editor.TileEditorPanel;
+import dev.forgeide.ui.library.LibrarySaveDialog;
+import dev.forgeide.ui.library.LibraryTileAssembler;
+import dev.forgeide.ui.library.TileLibraryPanel;
 import javafx.application.Platform;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
@@ -33,8 +43,13 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * T22 top-level screen: the constructor's two representations of one {@link PipelineDocument}
@@ -61,6 +76,13 @@ public final class PipelineConstructorView extends BorderPane {
     private final Label yamlStatus = new Label();
     private final Button undoButton = new Button("Undo");
     private final Button redoButton = new Button("Redo");
+    private final TabPane tabs = new TabPane();
+    private final Tab canvasTab;
+    /** T23/FR-2.9: shared by both halves of the library flow — {@link #saveSelectionToLibrary}
+     * writes through it, the "Library" tab's {@link TileLibraryPanel} reads through its own
+     * instance of the same store (same on-disk format, no shared mutable state needed). */
+    private final TileLibraryStore libraryStore = new TileLibraryStore();
+    private final TileLibraryPanel libraryPanel;
 
     private String lastSavedYaml;
 
@@ -84,7 +106,8 @@ public final class PipelineConstructorView extends BorderPane {
             undoButton.setDisable(!document.canUndo());
             redoButton.setDisable(!document.canRedo());
         };
-        this.canvas = new ConstructorCanvasView(document, validityChecker, onDocumentChanged);
+        this.canvas = new ConstructorCanvasView(document, validityChecker, onDocumentChanged,
+                this::seedAgentPrompt, this::saveSelectionToLibrary);
         undoButton.setOnAction(e -> {
             document.undo();
             canvas.refresh();
@@ -109,11 +132,12 @@ public final class PipelineConstructorView extends BorderPane {
 
         yamlArea.setText(pipelineYaml.serialize(document.current()));
 
-        TabPane tabs = new TabPane();
         tabs.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
-        Tab canvasTab = new Tab("Canvas", canvasSplit);
+        this.canvasTab = new Tab("Canvas", canvasSplit);
         Tab yamlTab = new Tab("YAML", buildYamlTab());
-        tabs.getTabs().addAll(canvasTab, yamlTab);
+        this.libraryPanel = new TileLibraryPanel(projectRoot, this::insertFromLibrary);
+        Tab libraryTab = new Tab("Library", libraryPanel);
+        tabs.getTabs().addAll(canvasTab, yamlTab, libraryTab);
         tabs.getSelectionModel().selectedItemProperty().addListener((obs, oldTab, newTab) -> {
             if (oldTab == yamlTab && newTab != yamlTab) {
                 if (!tryApplyYamlText()) {
@@ -126,10 +150,58 @@ public final class PipelineConstructorView extends BorderPane {
                 yamlArea.setText(pipelineYaml.serialize(document.current()));
                 yamlStatus.setText("");
             }
+            if (newTab == libraryTab) {
+                libraryPanel.refresh();
+            }
         });
 
         setTop(header(title, onBack));
         setCenter(tabs);
+    }
+
+    // ---- T23/FR-2.8 "create from scratch": seed a fresh agent tile's prompt file -------------
+
+    /** Wired as {@link ConstructorCanvasView.NewAgentPromptHandler} — the only place
+     * {@code prompts/<id>.md} (the path {@code StepDefaults} already pointed the step at) is
+     * actually written, with the §5.2 result-contract scaffold baked in. */
+    private void seedAgentPrompt(AgentStep step) {
+        writeDirect(projectRoot.resolve(step.promptTemplate()), AgentPromptScaffold.render(step.id()));
+    }
+
+    // ---- T23/FR-2.9 library: save selection / insert entry -----------------------------------
+
+    /** Wired as {@link ConstructorCanvasView.LibrarySaveHandler}. Collects title/owner/scope/
+     * validity and the target library (project vs. user) through {@link LibrarySaveDialog}, then
+     * captures every prompt/script file the selection references and persists the whole thing
+     * through {@link TileLibraryStore}. */
+    private void saveSelectionToLibrary(List<StepDefinition> selectedSteps) {
+        if (selectedSteps.isEmpty()) {
+            return;
+        }
+        LibrarySaveDialog.show(selectedSteps.size(), request -> {
+            Path libraryDir = request.libraryScope().directory(projectRoot);
+            Set<String> existingIds = libraryStore.list(libraryDir).stream()
+                    .map(LibraryTileMetadata::id).collect(Collectors.toCollection(LinkedHashSet::new));
+            String id = LibraryTileIds.unique(request.title(), existingIds);
+            LibraryTileMetadata metadata = new LibraryTileMetadata(id, request.title(), request.owner(),
+                    request.validUntil(), request.scopeTags(), Instant.now());
+            Map<String, String> files = LibraryTileAssembler.collectFiles(projectRoot, selectedSteps);
+            libraryStore.save(libraryDir, new LibraryTile(metadata, selectedSteps, files));
+            libraryPanel.refresh();
+        });
+    }
+
+    /** Wired as the {@link TileLibraryPanel}'s insert callback. {@link LibraryTileInsertion} is
+     * pure — it only decides fresh ids and target paths — so this is the one place that actually
+     * writes the relocated prompt/script files before handing the rewired steps to the canvas
+     * (FR-2.9: "вставка ... без ручной правки путей"). */
+    private void insertFromLibrary(LibraryTile tile) {
+        Set<String> existingIds = document.current().steps().stream()
+                .map(StepDefinition::id).collect(Collectors.toCollection(LinkedHashSet::new));
+        LibraryTileInsertion.Result result = LibraryTileInsertion.insert(tile, existingIds);
+        result.files().forEach((relativePath, content) -> writeDirect(projectRoot.resolve(relativePath), content));
+        canvas.insertSteps(result.steps());
+        tabs.getSelectionModel().select(canvasTab);
     }
 
     // ---- Canvas-tab save routing (mirrors PipelineCanvasView's T20 wiring) -------------------
