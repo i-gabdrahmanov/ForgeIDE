@@ -97,6 +97,10 @@ public final class RunView extends BorderPane {
         // script edit becomes the new trusted baseline instead of registering as drift. A script
         // outside the harness has no such determinism/drift concern (never snapshotted by the
         // engine, read fresh off disk by ScriptExecutor every time) so it writes straight through.
+        // T21/FR-8.4-8.5: same "always through the live engine" reasoning as the T20 save
+        // handlers above — a dry-run needs the engine's own resolver/cache-guard/script-runner
+        // wiring, and a prompt preview must render through the engine's own dispatch-render code
+        // (never a UI-side reimplementation) to stay byte-identical to what a real run sends.
         inspector = new TileEditorPanel(project.repositoryPath(),
                 (stepId, absolutePath, content) -> viewModel.editPrompt(stepId, content),
                 (relativePath, content) -> {
@@ -105,7 +109,10 @@ public final class RunView extends BorderPane {
                     } else {
                         writeDirect(project.repositoryPath().resolve(relativePath), content);
                     }
-                });
+                },
+                viewModel::requestPromptPreview,
+                (judgeStepId, onResult) -> viewModel.requestJudgeDryRun(judgeStepId,
+                        result -> onResult.accept(new TileEditorPanel.JudgeDryRunOutcome(result.passed(), result.detail()))));
 
         TabPane bottom = new TabPane(
                 new Tab("Timeline", timelineView),

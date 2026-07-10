@@ -155,4 +155,40 @@ public sealed interface EngineCommand {
      */
     record HarnessEdited(RunId runId, String relativePath, String content, String user, Instant at) implements EngineCommand {
     }
+
+    /**
+     * T21/FR-8.4: "прогнать судью" from the tile inspector — executes {@code judgeStepId}'s
+     * deterministic check (and, if configured, its LLM verdict) against {@code targetStepId}'s
+     * artifacts as they sit on disk right now, without touching {@code StepRun} status or {@code
+     * run.json} (the SoT) at all; the only trace is the {@code judge.dryrun} audit event. Works
+     * regardless of the target step's own current status — a dry run against a much earlier
+     * iteration's leftover artifacts, or artifacts from before an IDE restart, is exactly the
+     * "без перезапуска агент-фаз" cycle this exists for. {@code requestId} correlates this
+     * command with its {@link dev.forgeide.core.event.EngineEvent.JudgeDryRunResult} reply, since
+     * a human can fire a second dry-run (after editing the check script) before the first one's
+     * script process has returned.
+     */
+    record JudgeDryRunRequested(RunId runId, String judgeStepId, String requestId) implements EngineCommand {
+    }
+
+    /**
+     * Internal follow-up {@link JudgeDryRunRequested} posts to itself once the script/LLM check
+     * actually ran (mirrors {@link StepCompleted}/{@link StepFailed}'s executor-thread-to-actor
+     * round trip) — never submitted by the UI directly.
+     */
+    record JudgeDryRunCompleted(RunId runId, String judgeStepId, String requestId, int iteration,
+                                 boolean passed, String detail) implements EngineCommand {
+    }
+
+    /**
+     * T21/FR-8.5: render the prompt {@code stepId} (an {@code AgentStep}, or a {@code JudgeStep}'s
+     * {@code llmJudge}) would actually receive on its next dispatch — same raw-prompt selection
+     * (mid-run edit override wins, else the run-start snapshot) and same {@code ${...}}/{@code
+     * accumulated_errors}/{@code answers} rendering the engine itself uses, so the preview can
+     * never drift from what a real run would send. Read-only: unlike {@link
+     * dev.forgeide.core.event.EngineCommand.PromptEdited}, a pending one-shot escalation override
+     * is peeked, never consumed.
+     */
+    record PromptPreviewRequested(RunId runId, String stepId, String requestId) implements EngineCommand {
+    }
 }

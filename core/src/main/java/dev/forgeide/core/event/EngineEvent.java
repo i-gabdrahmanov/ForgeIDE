@@ -54,4 +54,19 @@ public sealed interface EngineEvent {
     record IncidentRaised(RunId runId, String stepId, FailureReason reason,
                           String detail) implements EngineEvent {
     }
+
+    /**
+     * T21/FR-8.4 reply to {@code EngineCommand.JudgeDryRunRequested}: the verdict a "прогнать
+     * судью" click produced, for the inspector panel to show — never persisted to {@code
+     * run.json}/{@code StepRun}, {@code requestId} is the only way a caller that fired more than
+     * one dry-run in a row tells its replies apart.
+     */
+    record JudgeDryRunResult(RunId runId, String stepId, String requestId, boolean passed,
+                              String detail) implements EngineEvent {
+    }
+
+    /** T21/FR-8.5 reply to {@code EngineCommand.PromptPreviewRequested}. */
+    record PromptPreviewReady(RunId runId, String stepId, String requestId,
+                               String renderedPrompt) implements EngineEvent {
+    }
 }

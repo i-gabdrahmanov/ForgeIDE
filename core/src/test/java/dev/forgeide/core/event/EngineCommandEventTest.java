@@ -30,6 +30,9 @@ class EngineCommandEventTest {
             case EngineCommand.RetryStep ignored -> "retry-step";
             case EngineCommand.PromptEdited ignored -> "prompt-edited";
             case EngineCommand.HarnessEdited ignored -> "harness-edited";
+            case EngineCommand.JudgeDryRunRequested ignored -> "judge-dry-run-requested";
+            case EngineCommand.JudgeDryRunCompleted ignored -> "judge-dry-run-completed";
+            case EngineCommand.PromptPreviewRequested ignored -> "prompt-preview-requested";
         };
 
         assertThat(kind).isEqualTo("cancel-run");
@@ -47,6 +50,8 @@ class EngineCommandEventTest {
             case EngineEvent.GateRequest ignored -> "gate-request";
             case EngineEvent.QuestionsPending ignored -> "questions-pending";
             case EngineEvent.IncidentRaised ignored -> "incident-raised";
+            case EngineEvent.JudgeDryRunResult ignored -> "judge-dry-run-result";
+            case EngineEvent.PromptPreviewReady ignored -> "prompt-preview-ready";
         };
 
         assertThat(kind).isEqualTo("run-updated");
