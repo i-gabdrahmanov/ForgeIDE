@@ -132,4 +132,27 @@ public sealed interface EngineCommand {
 
     record RetryStep(RunId runId, String stepId) implements EngineCommand {
     }
+
+    /**
+     * T20/FR-8.2 trusted prompt edit, submitted by the tile inspector while a run is live:
+     * {@code stepId} is the {@code AgentStep} or {@code JudgeStep} (its {@code llmJudge}) whose
+     * prompt file changed — never a raw {@code templateKey}, the engine resolves that itself so
+     * the UI does not need to know about {@code per_task_loop} namespacing. Applies only to the
+     * step's next dispatch (FR-8.2's "со следующего запуска") — a currently {@code RUNNING}
+     * iteration already captured its own prompt text and is unaffected.
+     *
+     * @param user who edited, {@code at} when — same "кто, когда" shape as {@link GateAnswered}.
+     */
+    record PromptEdited(RunId runId, String stepId, String content, String user, Instant at) implements EngineCommand {
+    }
+
+    /**
+     * T20/FR-8.3 trusted harness edit, submitted by the tile inspector while a run is live:
+     * {@code relativePath} is project-relative under the harness root (e.g. {@code
+     * hooks/tdd-guard.py}), routed through {@link dev.forgeide.core.port.HarnessGuardPort#edit}
+     * so a save through the IDE can never itself register as {@code STOPPED(harness-drift)}
+     * (SR-8) — only an edit that bypasses this command does.
+     */
+    record HarnessEdited(RunId runId, String relativePath, String content, String user, Instant at) implements EngineCommand {
+    }
 }

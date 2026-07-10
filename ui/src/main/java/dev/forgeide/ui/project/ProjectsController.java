@@ -40,6 +40,9 @@ public final class ProjectsController {
     private final ProjectRegistry registry;
     private final RuntimeAvailabilityChecker checker;
     private final RunEngineRegistry engineRegistry;
+    /** T20/FR-8.3: shared across idle-canvas screens — the same trusted-edit path {@link
+     * #showRun} wires into a live {@link PipelineEngine} for a mid-run save. */
+    private final DefaultHarnessGuard harnessGuard = new DefaultHarnessGuard();
     private final BorderPane root = new BorderPane();
 
     public ProjectsController(ProjectRegistry registry, RuntimeAvailabilityChecker checker) {
@@ -108,7 +111,7 @@ public final class ProjectsController {
                                  RunSnapshot snapshot) {
         PipelineEngine engine = new PipelineEngine(stateStore, CompositeAgentRuntime.claudeAndGigacode(),
                 new ScriptExecutor(), new ManifestProjector(), new GitScopeDiff(), new FileSecretStore(),
-                OutwardActionsPort.NOOP, new DefaultHarnessGuard());
+                OutwardActionsPort.NOOP, harnessGuard);
         RunId runId = snapshot.runId();
         engine.resume(project, pipeline, runId);
         engineRegistry.register(runId, engine);
@@ -127,7 +130,7 @@ public final class ProjectsController {
         StateStore stateStore = new FileStateStore(FileStateStore.defaultRoot(projectHash, pipeline.id()));
         PipelineEngine engine = new PipelineEngine(stateStore, CompositeAgentRuntime.claudeAndGigacode(),
                 new ScriptExecutor(), new ManifestProjector(), new GitScopeDiff(), new FileSecretStore(),
-                OutwardActionsPort.NOOP, new DefaultHarnessGuard());
+                OutwardActionsPort.NOOP, harnessGuard);
         RunId runId = engine.start(project, pipeline, featureSlug);
         engineRegistry.register(runId, engine);
 
@@ -152,7 +155,7 @@ public final class ProjectsController {
                 : new PipelineYaml.ParseResult(Optional.empty(),
                         List.of(PipelineError.atPipeline("", "no pipeline.yaml at " + pipelinePath)));
         root.setCenter(new PipelineCanvasView(project.name(), result, TileValidityChecker.unknown(),
-                () -> showDetail(project)));
+                project.repositoryPath(), harnessGuard, () -> showDetail(project)));
     }
 
     private void saveAndShowDetail(ProjectDefinition project) {

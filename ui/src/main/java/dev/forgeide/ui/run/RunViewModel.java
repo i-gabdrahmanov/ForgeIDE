@@ -81,6 +81,19 @@ public final class RunViewModel {
         engine.submit(new EngineCommand.RetryStep(runId, stepId));
     }
 
+    /** T20/FR-8.2: trusted-path prompt edit while this run is live — applies from the step's next
+     * dispatch only, audited by the engine as {@code prompt.edited}. */
+    public void editPrompt(String stepId, String content) {
+        engine.submit(new EngineCommand.PromptEdited(runId, stepId, content, currentUser(), Instant.now()));
+    }
+
+    /** T20/FR-8.3: trusted-path judge/hook script edit while this run is live — routes through
+     * {@code HarnessGuardPort#edit} so the save itself becomes the new baseline instead of
+     * registering as harness drift, audited as {@code harness.edited}. */
+    public void editHarness(String relativePath, String content) {
+        engine.submit(new EngineCommand.HarnessEdited(runId, relativePath, content, currentUser(), Instant.now()));
+    }
+
     /** Stops listening — call when the {@link RunView} is closed/navigated away from. */
     public void dispose() {
         engine.unsubscribe(listener);

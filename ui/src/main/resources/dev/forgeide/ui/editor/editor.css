@@ -1,0 +1,19 @@
+.prompt-code-area {
+    -fx-font-family: "Menlo", "Consolas", monospace;
+    -fx-font-size: 12px;
+}
+
+.md-header    { -fx-fill: #1a73e8; -fx-font-weight: bold; }
+.md-bold      { -fx-fill: #202124; -fx-font-weight: bold; }
+.md-emphasis  { -fx-fill: #202124; -fx-font-style: italic; }
+.md-code      { -fx-fill: #a142f4; }
+.md-fence     { -fx-fill: #5f6368; }
+
+.py-keyword   { -fx-fill: #a142f4; -fx-font-weight: bold; }
+.py-string    { -fx-fill: #34a853; }
+.py-comment   { -fx-fill: #9aa0a6; -fx-font-style: italic; }
+.py-number    { -fx-fill: #f9ab00; }
+
+.contract-block {
+    -rtfx-background-color: #fff3cd;
+}

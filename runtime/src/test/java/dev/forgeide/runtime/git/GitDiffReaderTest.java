@@ -52,6 +52,39 @@ class GitDiffReaderTest {
         assertThat(diff).startsWith("(git diff unavailable");
     }
 
+    @Test
+    void perFileOverloadScopesTheDiffToJustThatFile(@TempDir Path repo) throws IOException, InterruptedException {
+        assumeGitAvailable();
+        run(repo, "init", "-q", ".");
+        run(repo, "config", "user.email", "test@example.com");
+        run(repo, "config", "user.name", "Test");
+        Files.writeString(repo.resolve("a.txt"), "hello\n");
+        Files.writeString(repo.resolve("b.txt"), "other\n");
+        run(repo, "add", "a.txt", "b.txt");
+        run(repo, "commit", "-q", "-m", "initial");
+        Files.writeString(repo.resolve("a.txt"), "hello, world\n");
+        Files.writeString(repo.resolve("b.txt"), "other, changed\n");
+
+        String diff = GitDiffReader.read(repo, Path.of("a.txt"), Duration.ofSeconds(5));
+
+        assertThat(diff).contains("a.txt").contains("+hello, world").doesNotContain("b.txt");
+    }
+
+    @Test
+    void perFileOverloadReportsNoChangesForAnUntouchedFile(@TempDir Path repo) throws IOException, InterruptedException {
+        assumeGitAvailable();
+        run(repo, "init", "-q", ".");
+        run(repo, "config", "user.email", "test@example.com");
+        run(repo, "config", "user.name", "Test");
+        Files.writeString(repo.resolve("a.txt"), "hello\n");
+        run(repo, "add", "a.txt");
+        run(repo, "commit", "-q", "-m", "initial");
+
+        String diff = GitDiffReader.read(repo, Path.of("a.txt"), Duration.ofSeconds(5));
+
+        assertThat(diff).isEqualTo("(no changes)");
+    }
+
     private static void assumeGitAvailable() {
         try {
             Process p = new ProcessBuilder("git", "--version").start();

@@ -19,9 +19,22 @@ public final class GitDiffReader {
     }
 
     public static String read(Path repoRoot, Duration timeout) {
+        return run(repoRoot, timeout, "git", "diff", "HEAD");
+    }
+
+    /**
+     * T20/FR-8.1 "diff к git-версии файла": the same best-effort {@code git diff HEAD}, scoped to
+     * one file via {@code -- <relativeFile>} — for the tile inspector, which shows a single
+     * prompt/script's own drift rather than the whole repository's.
+     */
+    public static String read(Path repoRoot, Path relativeFile, Duration timeout) {
+        return run(repoRoot, timeout, "git", "diff", "HEAD", "--", relativeFile.toString());
+    }
+
+    private static String run(Path repoRoot, Duration timeout, String... command) {
         Process process;
         try {
-            process = new ProcessBuilder("git", "diff", "HEAD")
+            process = new ProcessBuilder(command)
                     .directory(repoRoot.toFile())
                     .redirectErrorStream(true)
                     .start();

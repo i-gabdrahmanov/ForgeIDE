@@ -28,6 +28,8 @@ class EngineCommandEventTest {
             case EngineCommand.HarnessDriftResolved ignored -> "harness-drift-resolved";
             case EngineCommand.CancelRun ignored -> "cancel-run";
             case EngineCommand.RetryStep ignored -> "retry-step";
+            case EngineCommand.PromptEdited ignored -> "prompt-edited";
+            case EngineCommand.HarnessEdited ignored -> "harness-edited";
         };
 
         assertThat(kind).isEqualTo("cancel-run");
