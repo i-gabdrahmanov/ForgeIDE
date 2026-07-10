@@ -12,6 +12,8 @@ import javafx.beans.property.SimpleObjectProperty;
 import java.time.Instant;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 
 /**
@@ -27,6 +29,12 @@ public final class RunViewModel {
     private final Consumer<EngineEvent> listener = this::onEvent;
     private Consumer<EngineEvent.GateRequest> gateHandler = r -> { };
     private Consumer<EngineEvent.QuestionsPending> questionsHandler = r -> { };
+
+    /** T21/FR-8.4-8.5: {@code requestId -> caller's callback}, since a human can fire a second
+     * dry-run/preview (after editing the check script/prompt) before the first one's reply
+     * arrives — this is how each reply finds its own caller instead of the last one registered. */
+    private final Map<String, Consumer<EngineEvent.JudgeDryRunResult>> judgeDryRunCallbacks = new ConcurrentHashMap<>();
+    private final Map<String, Consumer<String>> promptPreviewCallbacks = new ConcurrentHashMap<>();
 
     public RunViewModel(PipelineEngine engine, RunId runId) {
         this.engine = engine;
@@ -94,6 +102,24 @@ public final class RunViewModel {
         engine.submit(new EngineCommand.HarnessEdited(runId, relativePath, content, currentUser(), Instant.now()));
     }
 
+    /**
+     * T21/FR-8.4: "прогнать судью" — the reply (never persisted to {@code run.json}, see {@code
+     * PipelineEngine#handleJudgeDryRunCompleted}) is delivered to {@code onResult} on the FX
+     * thread exactly once.
+     */
+    public void requestJudgeDryRun(String judgeStepId, Consumer<EngineEvent.JudgeDryRunResult> onResult) {
+        String requestId = UUID.randomUUID().toString();
+        judgeDryRunCallbacks.put(requestId, onResult);
+        engine.submit(new EngineCommand.JudgeDryRunRequested(runId, judgeStepId, requestId));
+    }
+
+    /** T21/FR-8.5: preview the prompt {@code stepId} would actually receive on its next dispatch. */
+    public void requestPromptPreview(String stepId, Consumer<String> onRendered) {
+        String requestId = UUID.randomUUID().toString();
+        promptPreviewCallbacks.put(requestId, onRendered);
+        engine.submit(new EngineCommand.PromptPreviewRequested(runId, stepId, requestId));
+    }
+
     /** Stops listening — call when the {@link RunView} is closed/navigated away from. */
     public void dispose() {
         engine.unsubscribe(listener);
@@ -106,6 +132,16 @@ public final class RunViewModel {
             Platform.runLater(() -> gateHandler.accept(request));
         } else if (event instanceof EngineEvent.QuestionsPending request && request.runId().equals(runId)) {
             Platform.runLater(() -> questionsHandler.accept(request));
+        } else if (event instanceof EngineEvent.JudgeDryRunResult result && result.runId().equals(runId)) {
+            Consumer<EngineEvent.JudgeDryRunResult> callback = judgeDryRunCallbacks.remove(result.requestId());
+            if (callback != null) {
+                Platform.runLater(() -> callback.accept(result));
+            }
+        } else if (event instanceof EngineEvent.PromptPreviewReady ready && ready.runId().equals(runId)) {
+            Consumer<String> callback = promptPreviewCallbacks.remove(ready.requestId());
+            if (callback != null) {
+                Platform.runLater(() -> callback.accept(ready.renderedPrompt()));
+            }
         }
     }
 }

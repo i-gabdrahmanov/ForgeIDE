@@ -542,6 +542,9 @@ public final class PipelineEngine implements AutoCloseable {
                 case EngineCommand.RetryStep c -> handleRetryStep(ctx, c);
                 case EngineCommand.PromptEdited c -> handlePromptEdited(ctx, c);
                 case EngineCommand.HarnessEdited c -> handleHarnessEdited(ctx, c);
+                case EngineCommand.JudgeDryRunRequested c -> handleJudgeDryRunRequested(ctx, c);
+                case EngineCommand.JudgeDryRunCompleted c -> handleJudgeDryRunCompleted(ctx, c);
+                case EngineCommand.PromptPreviewRequested c -> handlePromptPreviewRequested(ctx, c);
             }
         } catch (RuntimeException ex) {
             log.error("run {} command handling failed for {}", ctx.run.id(), command, ex);
@@ -565,6 +568,9 @@ public final class PipelineEngine implements AutoCloseable {
             case EngineCommand.HarnessDriftResolved c -> null;
             case EngineCommand.HarnessEdited c -> null;
             case EngineCommand.CancelRun c -> null;
+            case EngineCommand.JudgeDryRunRequested c -> c.judgeStepId();
+            case EngineCommand.JudgeDryRunCompleted c -> c.judgeStepId();
+            case EngineCommand.PromptPreviewRequested c -> c.stepId();
         };
     }
 
@@ -1276,12 +1282,12 @@ public final class PipelineEngine implements AutoCloseable {
         workers.execute(() -> {
             try {
                 String templateKey = ctx.templateKeyOf.getOrDefault(step.id(), step.id());
+                String raw = rawPromptForDispatch(ctx, step.id(), templateKey);
                 // FR-11.3 "edit_prompt" escalation action: a one-shot human replacement for this
-                // single attempt, consumed here rather than left to leak into later iterations.
-                String raw = ctx.promptOverrides.remove(step.id());
-                if (raw == null) {
-                    raw = ctx.promptSnapshots.get(templateKey);
-                }
+                // single attempt, consumed here (never by {@link #rawPromptForDispatch} itself,
+                // which a T21 preview also calls and must leave the override untouched) rather
+                // than left to leak into later iterations.
+                ctx.promptOverrides.remove(step.id());
                 if (raw == null) {
                     submit(new EngineCommand.StepFailed(runId, step.id(), iteration, FailureReason.ARTIFACTS,
                             "no prompt snapshot for " + templateKey));
@@ -1376,6 +1382,58 @@ public final class PipelineEngine implements AutoCloseable {
         return sb.toString();
     }
 
+    /** T21/FR-8.5: the raw prompt text {@link #dispatchAgent} would send on its next dispatch for
+     * {@code stepId} — an escalation's pending one-shot {@code edit_prompt} override if present,
+     * else the (possibly T20-mid-run-edited) run-start snapshot. A peek, never a consume — {@link
+     * #dispatchAgent} alone removes the override, and only once it actually dispatches. */
+    private static String rawPromptForDispatch(RunContext ctx, String stepId, String templateKey) {
+        String override = ctx.promptOverrides.get(stepId);
+        return override != null ? override : ctx.promptSnapshots.get(templateKey);
+    }
+
+    /**
+     * T21/FR-8.5: renders exactly the prompt text {@code def}'s next dispatch would send — reuses
+     * {@link #rawPromptForDispatch}, {@link VariableResolver#render}, and {@link
+     * #appendContextBlocks} (for an {@code AgentStep}; a judge's {@code llmJudge} skips that last
+     * step, same as {@link #dispatchJudge} itself does), not a reimplementation of any of them, so
+     * a preview can never quietly drift from what a real run sends. Mirrors {@link
+     * #handlePromptEdited}'s "which prompt file does this step id mean" branching. Empty for
+     * anything else (a {@code ScriptStep}, a judge with no {@code llmJudge}, or a step whose
+     * prompt was never snapshotted).
+     */
+    private Optional<String> renderPromptPreview(RunContext ctx, StepDefinition def) {
+        if (def instanceof AgentStep agent) {
+            String templateKey = ctx.templateKeyOf.getOrDefault(agent.id(), agent.id());
+            String raw = rawPromptForDispatch(ctx, agent.id(), templateKey);
+            if (raw == null) {
+                return Optional.empty();
+            }
+            return Optional.of(appendContextBlocks(ctx, agent.id(), ctx.resolver.render(raw)));
+        }
+        if (def instanceof JudgeStep judge && judge.llmJudge().isPresent()) {
+            // Mirrors dispatchJudge's own LLM-verdict prompt build exactly: no promptOverrides
+            // consultation, no accumulated_errors/answers blocks — judges never receive either.
+            String templateKey = ctx.templateKeyOf.getOrDefault(judge.id(), judge.id()) + ".llm";
+            return Optional.of(ctx.resolver.render(ctx.promptSnapshots.getOrDefault(templateKey, "")));
+        }
+        return Optional.empty();
+    }
+
+    private void handlePromptPreviewRequested(RunContext ctx, EngineCommand.PromptPreviewRequested cmd) {
+        StepDefinition def = ctx.stepDefs.get(cmd.stepId());
+        if (def == null) {
+            log.warn("prompt preview requested for unknown step {}", cmd.stepId());
+            return;
+        }
+        Optional<String> rendered = renderPromptPreview(ctx, def);
+        if (rendered.isEmpty()) {
+            log.warn("prompt preview for {} rejected: not an agent/llm-judge step, or no prompt snapshot yet",
+                    cmd.stepId());
+            return;
+        }
+        publish(new EngineEvent.PromptPreviewReady(ctx.run.id(), cmd.stepId(), cmd.requestId(), rendered.get()));
+    }
+
     private void dispatchJudge(RunContext ctx, JudgeStep judge) {
         RuntimeBinding llmBinding = null;
         if (judge.llmJudge().isPresent()) {
@@ -1402,58 +1460,153 @@ public final class PipelineEngine implements AutoCloseable {
             persistAndPublish(ctx);
         }
         RuntimeBinding finalLlmBinding = llmBinding;
+        Path llmLogDir = logDir(ctx, judge.id(), iteration).resolve("llm");
         workers.execute(() -> {
             try {
-                boolean deterministicPassed = true;
-                StringBuilder detail = new StringBuilder();
-                if (judge.deterministicCheck().isPresent()) {
-                    ScriptStep check = judge.deterministicCheck().get();
-                    List<String> command = resolvedCommand.orElseThrow();
-                    ScriptResult result = scriptRunner.run(
-                            new ScriptInvocation(ctx.projectRoot, command, check.timeout(), Map.of()));
-                    deterministicPassed = result.exitCode() == 0;
-                    detail.append("check exit ").append(result.exitCode());
-                    // The exit code alone gives the agent nothing to act on for the next
-                    // iteration's accumulated_errors block (FR-4.5) — carry the check's own
-                    // diagnostic output too, since that is what actually names the problem.
-                    String output = !result.stderr().isBlank() ? result.stderr() : result.stdout();
-                    if (!output.isBlank()) {
-                        detail.append(": ").append(output.strip());
-                    }
-                }
-                if (judge.llmJudge().isPresent()) {
-                    AgentStep llm = judge.llmJudge().get();
-                    String templateKey = ctx.templateKeyOf.getOrDefault(judge.id(), judge.id()) + ".llm";
-                    String raw = ctx.promptSnapshots.getOrDefault(templateKey, "");
-                    Path logDir = logDir(ctx, judge.id(), iteration).resolve("llm");
-                    AgentInvocation invocation = new AgentInvocation(ctx.projectRoot, ctx.resolver.render(raw),
-                            llm.budget().wallClock(), llm.budget().tokens(),
-                            llm.budget().outputMb() * 1024L * 1024L, logDir, finalLlmBinding,
-                            secretStore.resolve(llm.envScope()));
-                    AgentResult result = agentRuntime.execute(invocation, event -> { });
-                    boolean llmPassed = result.finalJson().map(PipelineEngine::isLlmPass).orElse(false);
-                    if (!detail.isEmpty()) {
-                        detail.append("; ");
-                    }
-                    detail.append("llm=").append(llmPassed);
-                    if (judge.deterministicCheck().isEmpty()) {
-                        deterministicPassed = llmPassed;
-                    }
-                }
-                if (detail.isEmpty()) {
-                    detail.append("no checks configured");
-                }
-                if (deterministicPassed) {
+                JudgeCheckOutcome outcome = runJudgeChecks(ctx, judge, resolvedCommand, finalLlmBinding, llmLogDir);
+                if (outcome.passed()) {
                     submit(new EngineCommand.StepCompleted(runId, judge.id(), iteration, List.of()));
                 } else {
                     submit(new EngineCommand.StepFailed(runId, judge.id(), iteration, FailureReason.JUDGE,
-                            detail.toString()));
+                            outcome.detail()));
                 }
             } catch (ScriptRunnerException | AgentRuntimeException | RuntimeException ex) {
                 submit(new EngineCommand.StepFailed(runId, judge.id(), iteration, FailureReason.JUDGE,
                         String.valueOf(ex.getMessage())));
             }
         });
+    }
+
+    private record JudgeCheckOutcome(boolean passed, String detail) {
+    }
+
+    /**
+     * The actual "run the check(s) and decide pass/fail" body a judge dispatch performs —
+     * factored out so {@link #dispatchJudge} and T21/FR-8.4's {@link
+     * #handleJudgeDryRunRequested} execute the identical logic (script command, LLM prompt build,
+     * exit-code/verdict combination rules) instead of two copies that could silently drift apart.
+     * Runs entirely off the actor thread (both call sites invoke it from inside {@code
+     * workers.execute}); reads only the immutable/effectively-final parts of {@code ctx} a normal
+     * judge dispatch already reads from a worker thread (resolver, projectRoot, promptSnapshots).
+     */
+    private JudgeCheckOutcome runJudgeChecks(RunContext ctx, JudgeStep judge, Optional<List<String>> resolvedCommand,
+                                              RuntimeBinding llmBinding, Path llmLogDir)
+            throws ScriptRunnerException, AgentRuntimeException {
+        boolean passed = true;
+        StringBuilder detail = new StringBuilder();
+        if (judge.deterministicCheck().isPresent()) {
+            ScriptStep check = judge.deterministicCheck().get();
+            List<String> command = resolvedCommand.orElseThrow();
+            ScriptResult result = scriptRunner.run(
+                    new ScriptInvocation(ctx.projectRoot, command, check.timeout(), Map.of()));
+            passed = result.exitCode() == 0;
+            detail.append("check exit ").append(result.exitCode());
+            // The exit code alone gives the agent nothing to act on for the next iteration's
+            // accumulated_errors block (FR-4.5) — carry the check's own diagnostic output too,
+            // since that is what actually names the problem.
+            String output = !result.stderr().isBlank() ? result.stderr() : result.stdout();
+            if (!output.isBlank()) {
+                detail.append(": ").append(output.strip());
+            }
+        }
+        if (judge.llmJudge().isPresent()) {
+            AgentStep llm = judge.llmJudge().get();
+            String templateKey = ctx.templateKeyOf.getOrDefault(judge.id(), judge.id()) + ".llm";
+            String raw = ctx.promptSnapshots.getOrDefault(templateKey, "");
+            AgentInvocation invocation = new AgentInvocation(ctx.projectRoot, ctx.resolver.render(raw),
+                    llm.budget().wallClock(), llm.budget().tokens(),
+                    llm.budget().outputMb() * 1024L * 1024L, llmLogDir, llmBinding,
+                    secretStore.resolve(llm.envScope()));
+            AgentResult result = agentRuntime.execute(invocation, event -> { });
+            boolean llmPassed = result.finalJson().map(PipelineEngine::isLlmPass).orElse(false);
+            if (!detail.isEmpty()) {
+                detail.append("; ");
+            }
+            detail.append("llm=").append(llmPassed);
+            if (judge.deterministicCheck().isEmpty()) {
+                passed = llmPassed;
+            }
+        }
+        if (detail.isEmpty()) {
+            detail.append("no checks configured");
+        }
+        return new JudgeCheckOutcome(passed, detail.toString());
+    }
+
+    /**
+     * T21/FR-8.4 "прогнать судью": runs {@code judgeStepId}'s check(s) against whatever sits on
+     * disk at its target step's {@code expected_artifacts} right now — no {@code StepRun}
+     * transition, no {@code run.json} write, works no matter the target step's own current
+     * status. {@code missing.isPresent()} ("если пути существуют" from the task scope) short-
+     * circuits before ever touching the script/LLM runtime, same message shape {@link
+     * ArtifactValidation} already gives a real agent-phase artifacts failure.
+     */
+    private void handleJudgeDryRunRequested(RunContext ctx, EngineCommand.JudgeDryRunRequested cmd) {
+        StepDefinition def = ctx.stepDefs.get(cmd.judgeStepId());
+        if (!(def instanceof JudgeStep judge)) {
+            log.warn("dry-run requested for {} which is not a judge step", cmd.judgeStepId());
+            return;
+        }
+        StepDefinition targetDef = ctx.stepDefs.get(judge.targetStepId());
+        List<Path> expectedArtifacts = targetDef instanceof AgentStep agentTarget
+                ? agentTarget.expectedArtifacts() : List.of();
+        int iteration = ctx.run.hasStep(judge.targetStepId()) ? ctx.run.step(judge.targetStepId()).iteration() : 0;
+        Optional<String> missing = ArtifactValidation.validate(ctx.projectRoot, expectedArtifacts);
+        if (missing.isPresent()) {
+            submit(new EngineCommand.JudgeDryRunCompleted(cmd.runId(), cmd.judgeStepId(), cmd.requestId(),
+                    iteration, false, missing.get()));
+            return;
+        }
+        RuntimeBinding llmBinding = null;
+        if (judge.llmJudge().isPresent()) {
+            String ref = judge.llmJudge().get().runtimeRef();
+            Optional<RuntimeBinding> resolved = ctx.project.runtime(ref);
+            if (resolved.isEmpty()) {
+                submit(new EngineCommand.JudgeDryRunCompleted(cmd.runId(), cmd.judgeStepId(), cmd.requestId(),
+                        iteration, false, "unknown runtime '" + ref + "'"));
+                return;
+            }
+            llmBinding = resolved.get();
+        }
+        // SR-7: the same cache-redirected command resolution a real dispatch uses, re-resolved
+        // fresh on every dry-run click — a T20 trusted-path script edit (which refreshes the
+        // cache) is picked up immediately, no extra invalidation needed.
+        Optional<List<String>> resolvedCommand = judge.deterministicCheck().map(check ->
+                harnessGuard.resolveFromCache(ctx.projectRoot,
+                        check.command().stream().map(ctx.resolver::render).toList()));
+        RuntimeBinding finalLlmBinding = llmBinding;
+        Path llmLogDir = RunLogLayout.stepLogDir(ctx.projectRoot, ctx.run.featureSlug(), judge.id(), iteration)
+                .resolve("dryrun").resolve("llm");
+        workers.execute(() -> {
+            try {
+                JudgeCheckOutcome outcome = runJudgeChecks(ctx, judge, resolvedCommand, finalLlmBinding, llmLogDir);
+                submit(new EngineCommand.JudgeDryRunCompleted(cmd.runId(), cmd.judgeStepId(), cmd.requestId(),
+                        iteration, outcome.passed(), outcome.detail()));
+            } catch (ScriptRunnerException | AgentRuntimeException | RuntimeException ex) {
+                submit(new EngineCommand.JudgeDryRunCompleted(cmd.runId(), cmd.judgeStepId(), cmd.requestId(),
+                        iteration, false, String.valueOf(ex.getMessage())));
+            }
+        });
+    }
+
+    /**
+     * T21/FR-8.4 completion: deliberately calls {@link StateStore#appendAudit} directly instead
+     * of the shared {@link #audit} helper — {@link #audit} also links the entry onto the target
+     * {@link StepRun} ({@link StepRun#recordEvent}), which is part of the persisted {@link
+     * RunSnapshot}/{@code run.json} (the SoT). A dry-run must leave both untouched (task
+     * acceptance: "не меняет run.json и статусы; в аудите только judge.dryrun") — only the
+     * append-only audit log, never folded back into run.json, records that it happened.
+     */
+    private void handleJudgeDryRunCompleted(RunContext ctx, EngineCommand.JudgeDryRunCompleted cmd) {
+        ObjectNode payload = MAPPER.createObjectNode();
+        payload.put("judgeStepId", cmd.judgeStepId());
+        payload.put("passed", cmd.passed());
+        payload.put("detail", cmd.detail());
+        AuditEvent envelope = new AuditEvent(0, Instant.now(), ctx.run.id(), cmd.judgeStepId(), cmd.iteration(),
+                "judge.dryrun", payload, "", "");
+        stateStore.appendAudit(envelope);
+        publish(new EngineEvent.JudgeDryRunResult(ctx.run.id(), cmd.judgeStepId(), cmd.requestId(),
+                cmd.passed(), cmd.detail()));
     }
 
     private static ObjectNode judgeScriptResolvedPayload(List<String> command) {
