@@ -61,6 +61,15 @@ public final class StartRunDialog extends BorderPane {
 
         content.getChildren().addAll(new Label("Feature slug"), featureSlug);
 
+        // FR-2.6 "запуск прогона заблокирован до зелёной валидации" — a structurally parseable
+        // pipeline (a model was built) can still fail acyclicity/reachability/judge-before-outward/
+        // variable-scope checks; those must block the same way an unparsable file already does.
+        if (!parsed.errors().isEmpty()) {
+            content.getChildren().add(errorLabel("pipeline.yaml has validation errors — a run is blocked:"));
+            parsed.errors().forEach(err -> content.getChildren().add(errorLabel("• " + err)));
+            start.setDisable(true);
+        }
+
         List<String> missing = ProjectParamValidator.missingRequiredParams(project, pipeline);
         if (!missing.isEmpty()) {
             content.getChildren().add(errorLabel("Missing required params — a run would be blocked: "
