@@ -21,8 +21,10 @@ import dev.forgeide.runtime.secret.FileSecretStore;
 import dev.forgeide.runtime.state.FileStateStore;
 import dev.forgeide.runtime.state.ManifestProjector;
 import dev.forgeide.runtime.state.ProjectHash;
+import dev.forgeide.importer.ProjectValidityCheckers;
 import dev.forgeide.ui.canvas.PipelineCanvasView;
 import dev.forgeide.ui.canvas.PipelineConstructorView;
+import dev.forgeide.ui.importer.ImportView;
 import dev.forgeide.ui.run.RunEngineRegistry;
 import dev.forgeide.ui.run.RunHistoryDialog;
 import dev.forgeide.ui.run.RunView;
@@ -74,7 +76,13 @@ public final class ProjectsController {
     public void showDetail(ProjectDefinition project) {
         root.setCenter(new ProjectDetailView(project, checker,
                 () -> showForm(Optional.of(project)), this::showList, () -> showCanvas(project),
-                () -> showStartRun(project), () -> showRunHistory(project)));
+                () -> showStartRun(project), () -> showRunHistory(project), () -> showImport(project)));
+    }
+
+    /** T24: scan a Forge-обвязка checkout, bind it against a bundled template, write
+     * {@code pipeline.yaml} + {@code prompts/} into the project once nothing is left unmatched. */
+    public void showImport(ProjectDefinition project) {
+        root.setCenter(new ImportView(project.repositoryPath(), () -> showDetail(project), () -> showDetail(project)));
     }
 
     /** Feature-slug + readiness form (SDD FR-7.9's launch flow); "Start" hands off to {@link #showRun}. */
@@ -156,7 +164,7 @@ public final class ProjectsController {
     public void showCanvas(ProjectDefinition project) {
         Path pipelinePath = project.repositoryPath().resolve(".forgeide").resolve("pipeline.yaml");
         root.setCenter(new PipelineConstructorView(project.name(), pipelinePath, project.repositoryPath(),
-                harnessGuard, TileValidityChecker.unknown(), "pipeline", () -> showDetail(project)));
+                harnessGuard, ProjectValidityCheckers.load(project.repositoryPath()), "pipeline", () -> showDetail(project)));
     }
 
     private void saveAndShowDetail(ProjectDefinition project) {

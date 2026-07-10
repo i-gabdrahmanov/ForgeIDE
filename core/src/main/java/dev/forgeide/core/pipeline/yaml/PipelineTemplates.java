@@ -8,9 +8,10 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 
 /**
- * Bundled {@code pipeline.yaml} templates shipped in IDE resources (SD §8, FR-9.1). For M1
- * only {@code forgelite} exists; {@code feature-pipeline} follows post-MVP. The raw text is
- * also exposed so editors can seed a new project's file with comments intact.
+ * Bundled {@code pipeline.yaml} templates shipped in IDE resources (SD §8, FR-9.1):
+ * {@code forgelite} (lite TDD loop) and {@code feature-pipeline} (BRD → design → per-task TDD
+ * loop → deliver, T24). The raw text is also exposed so editors can seed a new project's file
+ * with comments intact.
  */
 public final class PipelineTemplates {
 
@@ -27,6 +28,16 @@ public final class PipelineTemplates {
     /** Raw forgelite template text (comments preserved). */
     public static String forgeliteYaml() {
         return read("forgelite.yaml");
+    }
+
+    /** The feature-pipeline template parsed and validated. */
+    public static PipelineDefinition featurePipeline() {
+        return new PipelineYaml().parse(featurePipelineYaml());
+    }
+
+    /** Raw feature-pipeline template text (comments preserved). */
+    public static String featurePipelineYaml() {
+        return read("feature-pipeline.yaml");
     }
 
     private static String read(String name) {
