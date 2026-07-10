@@ -16,6 +16,9 @@
 .step-tile:hover { -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.35), 6, 0.3, 0, 1); }
 .step-tile.selected { -fx-border-width: 3; -fx-border-color: #1a73e8; }
 .step-tile.has-error { -fx-border-color: #d93025; -fx-border-width: 2.5; }
+/* T23: ctrl/cmd-click "save subgraph to library" selection — independent of .selected (the
+   single-tile inspector focus), so both can be shown on the same tile at once. */
+.step-tile.in-selection { -fx-effect: dropshadow(gaussian, rgba(26,115,232,0.85), 10, 0.5, 0, 0); }
 
 .tile-type { -fx-font-size: 9px; -fx-font-weight: bold; -fx-text-fill: #555555; }
 .tile-id { -fx-font-size: 12px; -fx-font-weight: bold; -fx-text-fill: #202124; }

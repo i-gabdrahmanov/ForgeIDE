@@ -1,5 +1,6 @@
 package dev.forgeide.ui.canvas;
 
+import dev.forgeide.core.pipeline.AgentStep;
 import dev.forgeide.core.pipeline.PipelineDefinition;
 import dev.forgeide.core.pipeline.StepDefinition;
 import dev.forgeide.core.pipeline.TileValidity;
@@ -19,6 +20,7 @@ import javafx.scene.control.Button;
 import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Label;
 import javafx.scene.control.MenuItem;
+import javafx.scene.control.Tooltip;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.TransferMode;
 import javafx.scene.layout.BorderPane;
@@ -65,14 +67,38 @@ public final class ConstructorCanvasView extends BorderPane {
     private static final double MIN_SCALE = 0.15;
     private static final double MAX_SCALE = 2.5;
 
+    /** T23/FR-2.8: fired once, right after a fresh {@code AgentStep} default is applied to the
+     * document — the sole hook that turns {@link StepDefaults}' non-existent {@code
+     * prompts/<id>.md} into a real, contract-carrying file on disk (see {@link
+     * dev.forgeide.core.pipeline.edit.AgentPromptScaffold}). {@code null} means read-only (no
+     * project to write into), same convention as every other handler in this constructor family. */
+    @FunctionalInterface
+    public interface NewAgentPromptHandler {
+        void created(AgentStep step);
+    }
+
+    /** T23/FR-2.9: "сохранение плитки или выделенного подграфа в библиотеку" — invoked with the
+     * current ctrl/cmd-click selection in pipeline order when the toolbar's library button is
+     * pressed; {@code null} means read-only, same convention as every other handler here. */
+    @FunctionalInterface
+    public interface LibrarySaveHandler {
+        void save(List<StepDefinition> selectedSteps);
+    }
+
     private final PipelineDocument document;
     private final TileValidityChecker validityChecker;
     private final Runnable onDocumentChanged;
+    private final NewAgentPromptHandler newAgentPromptHandler;
+    private final LibrarySaveHandler librarySaveHandler;
     private final Pane world = new Pane();
     private final Scale scale = new Scale(1, 1, 0, 0);
     private final Map<String, StepTileView> tilesById = new LinkedHashMap<>();
     private final ObjectProperty<StepDefinition> selectedStep = new SimpleObjectProperty<>();
     private final Label banner = new Label();
+    /** T23: the ctrl/cmd-click "save this subgraph to the library" selection — independent of
+     * {@link #selectedStepId} (the inspector's single-tile focus, unchanged by T22). */
+    private final Set<String> librarySelection = new LinkedHashSet<>();
+    private final Button saveToLibraryButton = new Button("Save to library…");
 
     private String selectedStepId;
     private Line pendingConnector;
@@ -91,9 +117,17 @@ public final class ConstructorCanvasView extends BorderPane {
      *                           button state in sync without polling. */
     public ConstructorCanvasView(PipelineDocument document, TileValidityChecker validityChecker,
                                   Runnable onDocumentChanged) {
+        this(document, validityChecker, onDocumentChanged, null, null);
+    }
+
+    public ConstructorCanvasView(PipelineDocument document, TileValidityChecker validityChecker,
+                                  Runnable onDocumentChanged, NewAgentPromptHandler newAgentPromptHandler,
+                                  LibrarySaveHandler librarySaveHandler) {
         this.document = document;
         this.validityChecker = validityChecker;
         this.onDocumentChanged = onDocumentChanged;
+        this.newAgentPromptHandler = newAgentPromptHandler;
+        this.librarySaveHandler = librarySaveHandler;
         getStylesheets().add(CanvasView.class.getResource("canvas.css").toExternalForm());
 
         world.getTransforms().add(scale);
@@ -161,6 +195,7 @@ public final class ConstructorCanvasView extends BorderPane {
         drawTiles(pipeline, effective, errorsByStep);
         updateBanner();
         restoreSelection(pipeline);
+        pruneLibrarySelection(pipeline);
         onDocumentChanged.run();
     }
 
@@ -172,10 +207,44 @@ public final class ConstructorCanvasView extends BorderPane {
         banner.getStyleClass().add("pipeline-error-banner");
         banner.setVisible(false);
         banner.setManaged(false);
-        HBox bar = new HBox(12, reset, banner);
+
+        saveToLibraryButton.setTooltip(new Tooltip(
+                "Ctrl/Cmd-click tiles to select a subgraph, or a single click to select one tile"));
+        saveToLibraryButton.setDisable(true);
+        saveToLibraryButton.setOnAction(e -> {
+            if (librarySaveHandler == null || librarySelection.isEmpty()) {
+                return;
+            }
+            librarySaveHandler.save(document.current().steps().stream()
+                    .filter(s -> librarySelection.contains(s.id()))
+                    .toList());
+        });
+
+        HBox bar = new HBox(12, reset, saveToLibraryButton, banner);
         bar.setPadding(new Insets(6, 10, 6, 10));
         bar.setAlignment(Pos.CENTER_LEFT);
         return bar;
+    }
+
+    /** Drops any id the last edit removed, and keeps the toolbar button's enabled state (which
+     * depends on both a non-empty selection and a wired handler) correct after every rebuild. */
+    private void pruneLibrarySelection(PipelineDefinition pipeline) {
+        Set<String> liveIds = idsOf(pipeline);
+        librarySelection.retainAll(liveIds);
+        applyLibrarySelectionStyles();
+        saveToLibraryButton.setDisable(librarySaveHandler == null || librarySelection.isEmpty());
+    }
+
+    private void applyLibrarySelectionStyles() {
+        tilesById.forEach((id, tile) -> {
+            if (librarySelection.contains(id)) {
+                if (!tile.getStyleClass().contains("in-selection")) {
+                    tile.getStyleClass().add("in-selection");
+                }
+            } else {
+                tile.getStyleClass().remove("in-selection");
+            }
+        });
     }
 
     private void updateBanner() {
@@ -212,6 +281,7 @@ public final class ConstructorCanvasView extends BorderPane {
             wireMove(tile, step.id());
             wireConnector(tile, step.id());
             wireContextMenu(tile, step.id());
+            wireLibrarySelection(tile, step);
             tilesById.put(step.id(), tile);
             world.getChildren().add(tile);
         }
@@ -319,6 +389,28 @@ public final class ConstructorCanvasView extends BorderPane {
         return Optional.empty();
     }
 
+    /** T23/FR-2.9: layered on top of {@link StepTileView}'s own {@code onSelect} plumbing — a
+     * plain click still drives the inspector via {@link #select} exactly as T22 left it; a
+     * ctrl/cmd-click additionally toggles this tile in {@link #librarySelection} without
+     * disturbing that inspector focus, so "select a subgraph" and "inspect one tile" stay
+     * independent gestures. */
+    private void wireLibrarySelection(StepTileView tile, StepDefinition step) {
+        tile.setOnMouseClicked(e -> {
+            if (e.isShortcutDown()) {
+                if (!librarySelection.remove(step.id())) {
+                    librarySelection.add(step.id());
+                }
+            } else {
+                librarySelection.clear();
+                librarySelection.add(step.id());
+            }
+            applyLibrarySelectionStyles();
+            saveToLibraryButton.setDisable(librarySaveHandler == null || librarySelection.isEmpty());
+            select(step);
+            e.consume();
+        });
+    }
+
     private void wireContextMenu(StepTileView tile, String stepId) {
         ContextMenu menu = new ContextMenu();
         MenuItem duplicate = new MenuItem("Duplicate");
@@ -366,8 +458,25 @@ public final class ConstructorCanvasView extends BorderPane {
         Point2D local = world.sceneToLocal(sceneX, sceneY);
         document.apply(PipelineEdits.addStep(StepDefaults.create(kind, id)));
         document.setPosition(id, local.getX() - CanvasLayout.TILE_WIDTH / 2, local.getY() - CanvasLayout.TILE_HEIGHT / 2);
+        if (kind == StepKind.AGENT && newAgentPromptHandler != null) {
+            newAgentPromptHandler.created((AgentStep) document.current().step(id));
+            document.revalidate(); // the handler just seeded the prompt file this step points at
+        }
         refresh();
         select(document.current().step(id));
+    }
+
+    /** T23/FR-2.9: applies a library insertion's already-rewired steps (fresh ids, rebound
+     * prompt/script paths) as one undo step — the caller has already written {@code
+     * LibraryTileInsertion.Result#files()} to disk before calling this. */
+    public void insertSteps(List<StepDefinition> steps) {
+        for (StepDefinition step : steps) {
+            document.apply(PipelineEdits.addStep(step));
+        }
+        refresh();
+        if (!steps.isEmpty()) {
+            select(document.current().step(steps.get(steps.size() - 1).id()));
+        }
     }
 
     private static Set<String> idsOf(PipelineDefinition pipeline) {
