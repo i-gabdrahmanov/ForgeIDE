@@ -9,15 +9,18 @@ import java.util.regex.Pattern;
  * ({@code 40m}, {@code 2h}, {@code 500ms}). ISO-8601 ({@code PT40M}) is also accepted on
  * read so hand-written and machine-written files interoperate. Formatting picks the largest
  * whole unit, which keeps {@code parse(format(d)).equals(d)} for round-trips.
+ *
+ * <p>Public so the T22 canvas config forms can accept/display the same literals the YAML
+ * itself uses, instead of reimplementing this parsing in the ui module.
  */
-final class Durations {
+public final class Durations {
 
     private static final Pattern COMPACT = Pattern.compile("(\\d+)\\s*(ms|s|m|h|d)");
 
     private Durations() {
     }
 
-    static Duration parse(String raw) {
+    public static Duration parse(String raw) {
         String text = raw.strip();
         Matcher m = COMPACT.matcher(text);
         if (m.matches()) {
@@ -34,7 +37,7 @@ final class Durations {
         return Duration.parse(text); // ISO-8601 fallback
     }
 
-    static String format(Duration d) {
+    public static String format(Duration d) {
         long ms = d.toMillis();
         if (ms == 0) {
             return "0s";

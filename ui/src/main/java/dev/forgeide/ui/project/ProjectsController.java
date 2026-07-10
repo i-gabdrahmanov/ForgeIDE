@@ -22,6 +22,7 @@ import dev.forgeide.runtime.state.FileStateStore;
 import dev.forgeide.runtime.state.ManifestProjector;
 import dev.forgeide.runtime.state.ProjectHash;
 import dev.forgeide.ui.canvas.PipelineCanvasView;
+import dev.forgeide.ui.canvas.PipelineConstructorView;
 import dev.forgeide.ui.run.RunEngineRegistry;
 import dev.forgeide.ui.run.RunHistoryDialog;
 import dev.forgeide.ui.run.RunView;
@@ -147,15 +148,15 @@ public final class ProjectsController {
                 TileValidityChecker.unknown(), this::showList));
     }
 
-    /** Opens {@code <repo>/.forgeide/pipeline.yaml}; badges render even if it is invalid (FR-2.3). */
+    /**
+     * T22: the constructor (drag&drop palette, drag-edge, undo/redo, YAML tab) for a real
+     * project's {@code pipeline.yaml} — missing file means "new, empty pipeline", not an error
+     * banner, since building one from scratch is exactly what the constructor is for.
+     */
     public void showCanvas(ProjectDefinition project) {
         Path pipelinePath = project.repositoryPath().resolve(".forgeide").resolve("pipeline.yaml");
-        PipelineYaml.ParseResult result = Files.isRegularFile(pipelinePath)
-                ? new PipelineYaml().parseLenient(pipelinePath)
-                : new PipelineYaml.ParseResult(Optional.empty(),
-                        List.of(PipelineError.atPipeline("", "no pipeline.yaml at " + pipelinePath)));
-        root.setCenter(new PipelineCanvasView(project.name(), result, TileValidityChecker.unknown(),
-                project.repositoryPath(), harnessGuard, () -> showDetail(project)));
+        root.setCenter(new PipelineConstructorView(project.name(), pipelinePath, project.repositoryPath(),
+                harnessGuard, TileValidityChecker.unknown(), "pipeline", () -> showDetail(project)));
     }
 
     private void saveAndShowDetail(ProjectDefinition project) {

@@ -8,6 +8,7 @@ import dev.forgeide.core.pipeline.TileValidity;
 import dev.forgeide.core.pipeline.validation.PipelineError;
 import dev.forgeide.runtime.git.GitDiffReader;
 import dev.forgeide.runtime.harness.JudgeScriptLocator;
+import dev.forgeide.ui.canvas.StepConfigEditor;
 import dev.forgeide.ui.canvas.TileDetailPanel;
 import javafx.application.Platform;
 import javafx.geometry.Insets;
@@ -100,37 +101,57 @@ public final class TileEditorPanel extends TabPane {
     private final ScriptSaveHandler scriptSaveHandler;
     private final PromptPreviewHandler promptPreviewHandler;
     private final JudgeDryRunHandler judgeDryRunHandler;
+    private final StepConfigEditor.OnApply configSaveHandler;
     private final TileDetailPanel configPanel = new TileDetailPanel();
+    private final StepConfigEditor configEditor = new StepConfigEditor();
 
     public TileEditorPanel(Path projectRoot, PromptSaveHandler promptSaveHandler, ScriptSaveHandler scriptSaveHandler) {
-        this(projectRoot, promptSaveHandler, scriptSaveHandler, null, null);
+        this(projectRoot, promptSaveHandler, scriptSaveHandler, null, null, null);
     }
 
     public TileEditorPanel(Path projectRoot, PromptSaveHandler promptSaveHandler, ScriptSaveHandler scriptSaveHandler,
                             PromptPreviewHandler promptPreviewHandler, JudgeDryRunHandler judgeDryRunHandler) {
+        this(projectRoot, promptSaveHandler, scriptSaveHandler, promptPreviewHandler, judgeDryRunHandler, null);
+    }
+
+    /** T22/FR-2.5: {@code configSaveHandler} swaps the read-only Config tab for an editable
+     * {@link StepConfigEditor}; {@code null} (every other overload) keeps it read-only exactly
+     * as before — the mid-run {@code RunView} inspector never passes one. */
+    public TileEditorPanel(Path projectRoot, PromptSaveHandler promptSaveHandler, ScriptSaveHandler scriptSaveHandler,
+                            PromptPreviewHandler promptPreviewHandler, JudgeDryRunHandler judgeDryRunHandler,
+                            StepConfigEditor.OnApply configSaveHandler) {
         this.projectRoot = projectRoot;
         this.promptSaveHandler = promptSaveHandler;
         this.scriptSaveHandler = scriptSaveHandler;
         this.promptPreviewHandler = promptPreviewHandler;
         this.judgeDryRunHandler = judgeDryRunHandler;
+        this.configSaveHandler = configSaveHandler;
         setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
         showEmpty();
     }
 
     public void showEmpty() {
         configPanel.showEmpty();
-        getTabs().setAll(new Tab("Config", configPanel));
+        configEditor.showEmpty();
+        getTabs().setAll(new Tab("Config", configSaveHandler != null ? configEditor : configPanel));
     }
 
     public void show(StepDefinition step, List<PipelineError> errors, TileValidity validity) {
-        configPanel.show(step, errors, validity);
+        Node configNode;
+        if (configSaveHandler != null) {
+            configEditor.show(step, errors, validity, configSaveHandler);
+            configNode = configEditor;
+        } else {
+            configPanel.show(step, errors, validity);
+            configNode = configPanel;
+        }
 
         List<Tab> tabs = new ArrayList<>();
         promptTarget(step).ifPresent(target ->
                 tabs.add(nonClosable("Prompt", promptEditor(target.stepId(), target.relativePath()))));
         scriptTarget(step).ifPresent(relativePath ->
                 tabs.add(nonClosable("Script", scriptEditor(step, relativePath))));
-        tabs.add(nonClosable("Config", configPanel));
+        tabs.add(nonClosable("Config", configNode));
         getTabs().setAll(tabs);
     }
 

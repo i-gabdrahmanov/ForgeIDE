@@ -66,6 +66,15 @@
 .edge-branch  { -fx-stroke: #a142f4; -fx-fill: transparent; -fx-stroke-width: 1.4; -fx-stroke-dash-array: 6 4; }
 .edge-label   { -fx-font-size: 9px; -fx-fill: #555555; }
 
+/* T22 constructor: drag-to-connect handle + the in-flight line while dragging one. */
+.connector-handle { -fx-fill: #1a73e8; -fx-cursor: crosshair; }
+.connector-handle:hover { -fx-fill: #0b57d0; }
+.edge-pending { -fx-stroke: #1a73e8; -fx-stroke-width: 1.8; -fx-stroke-dash-array: 4 3; }
+
+.tile-palette { -fx-background-color: #fafafa; -fx-border-color: #dddddd; -fx-border-width: 0 1 0 0; }
+.palette-heading { -fx-font-size: 11px; -fx-font-weight: bold; -fx-text-fill: #555555; }
+.palette-entry { -fx-padding: 6 10 6 10; -fx-cursor: hand; -fx-font-size: 11px; }
+
 .pipeline-error-banner {
     -fx-background-color: #fde7e9;
     -fx-text-fill: #d93025;

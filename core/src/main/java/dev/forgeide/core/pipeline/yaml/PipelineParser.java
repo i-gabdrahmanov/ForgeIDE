@@ -37,8 +37,7 @@ import java.util.Set;
 final class PipelineParser {
 
     /** Budget applied to agent steps that do not declare one (SDD §5.1). */
-    private static final TokenBudget DEFAULT_BUDGET =
-            new TokenBudget(2_000_000, Duration.ofMinutes(30), 512);
+    private static final TokenBudget DEFAULT_BUDGET = TokenBudget.DEFAULT;
     private static final Duration DEFAULT_SCRIPT_TIMEOUT = Duration.ofMinutes(5);
     /** Risk applied to gate steps that do not declare one (SDD FR-1.3/FR-5.3). */
     private static final RiskLevel DEFAULT_GATE_RISK = RiskLevel.R1;
