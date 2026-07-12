@@ -95,4 +95,22 @@ final class RunContext {
         this.stepDefs = stepDefs;
         this.promptSnapshots = promptSnapshots;
     }
+
+    /** FR-10.5: a fresh attempt (initial dispatch, judge retry, manual retry) gets a fresh
+     * question-round budget — only a question-answer redispatch (which calls {@code
+     * PipelineEngine#dispatch} directly, bypassing this) continues accumulating rounds within
+     * the same attempt. */
+    void resetQuestionRounds(String stepId) {
+        questionRounds.remove(stepId);
+        questionRoundHistory.remove(stepId);
+    }
+
+    /** T21/FR-8.5: the raw prompt text a step's next dispatch would send for {@code stepId} — an
+     * escalation's pending one-shot {@code edit_prompt} override if present, else the (possibly
+     * T20-mid-run-edited) run-start snapshot. A peek, never a consume — only a real dispatch
+     * removes the override, and only once it actually dispatches. */
+    String rawPromptForDispatch(String stepId, String templateKey) {
+        String override = promptOverrides.get(stepId);
+        return override != null ? override : promptSnapshots.get(templateKey);
+    }
 }
