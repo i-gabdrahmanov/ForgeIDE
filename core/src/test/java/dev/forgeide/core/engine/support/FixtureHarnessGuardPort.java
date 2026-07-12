@@ -36,7 +36,7 @@ public final class FixtureHarnessGuardPort implements HarnessGuardPort {
 
     @Override
     public PreflightStatus preflightStatus(Path projectRoot) {
-        return new PreflightStatus(preflightPassed, preflightDetail);
+        return new PreflightStatus(preflightPassed, preflightDetail, Optional.empty());
     }
 
     @Override

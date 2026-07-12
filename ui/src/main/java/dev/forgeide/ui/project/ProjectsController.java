@@ -30,6 +30,8 @@ import dev.forgeide.ui.run.RunHistoryDialog;
 import dev.forgeide.ui.run.RunView;
 import dev.forgeide.ui.run.StartRunDialog;
 import javafx.scene.Parent;
+import javafx.scene.control.Alert;
+import javafx.scene.control.ButtonType;
 import javafx.scene.layout.BorderPane;
 
 import java.nio.file.Files;
@@ -74,15 +76,34 @@ public final class ProjectsController {
     }
 
     public void showDetail(ProjectDefinition project) {
-        root.setCenter(new ProjectDetailView(project, checker,
+        showDetail(project, false);
+    }
+
+    /** T37: {@code autoDeployHarness} triggers the project card's "Deploy harness" button once,
+     * right after it's built — used by {@link #showImport}'s post-import prompt so "deploy now?"
+     * actually deploys instead of just landing back on a card that still says "not deployed". */
+    private void showDetail(ProjectDefinition project, boolean autoDeployHarness) {
+        root.setCenter(new ProjectDetailView(project, checker, harnessGuard, autoDeployHarness,
                 () -> showForm(Optional.of(project)), this::showList, () -> showCanvas(project),
                 () -> showStartRun(project), () -> showRunHistory(project), () -> showImport(project)));
     }
 
     /** T24: scan a Forge-обвязка checkout, bind it against a bundled template, write
-     * {@code pipeline.yaml} + {@code prompts/} into the project once nothing is left unmatched. */
+     * {@code pipeline.yaml} + {@code prompts/} into the project once nothing is left unmatched.
+     * T37: a successful import is exactly when a fresh project's harness is most likely still
+     * undeployed — {@link #onImportComplete} offers to deploy it right there before the human
+     * even has to notice the project card says "not deployed". */
     public void showImport(ProjectDefinition project) {
-        root.setCenter(new ImportView(project.repositoryPath(), () -> showDetail(project), () -> showDetail(project)));
+        root.setCenter(new ImportView(project.repositoryPath(), () -> showDetail(project),
+                () -> onImportComplete(project)));
+    }
+
+    private void onImportComplete(ProjectDefinition project) {
+        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                "Import finished. Deploy the harness now so a run can start?");
+        confirm.setHeaderText("Deploy harness?");
+        boolean deployNow = confirm.showAndWait().filter(b -> b == ButtonType.OK).isPresent();
+        showDetail(project, deployNow);
     }
 
     /** Feature-slug + readiness form (SDD FR-7.9's launch flow); "Start" hands off to {@link #showRun}. */

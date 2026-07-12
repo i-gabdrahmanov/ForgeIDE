@@ -1,6 +1,7 @@
 package dev.forgeide.core.port;
 
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -42,7 +43,7 @@ public interface HarnessGuardPort {
 
         @Override
         public PreflightStatus preflightStatus(Path projectRoot) {
-            return new PreflightStatus(true, "");
+            return new PreflightStatus(true, "", Optional.empty());
         }
 
         @Override
@@ -127,11 +128,14 @@ public interface HarnessGuardPort {
     record DeployResult(String hash, boolean preflightPassed, String preflightOutput) {
     }
 
-    /** @param passed whether a harness has ever been deployed and its last preflight passed.
-     * @param detail  human-readable diagnostic — preflight output, or "not deployed" if none. */
-    record PreflightStatus(boolean passed, String detail) {
+    /** @param passed     whether a harness has ever been deployed and its last preflight passed.
+     * @param detail      human-readable diagnostic — preflight output, or "not deployed" if none.
+     * @param deployedAt  T37: when the current baseline was deployed (empty if never deployed) —
+     *                    shown on the project card next to {@code passed}/{@code detail}. */
+    record PreflightStatus(boolean passed, String detail, Optional<Instant> deployedAt) {
         public PreflightStatus {
             Objects.requireNonNull(detail, "detail");
+            Objects.requireNonNull(deployedAt, "deployedAt");
         }
     }
 

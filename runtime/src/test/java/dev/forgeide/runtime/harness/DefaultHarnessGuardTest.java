@@ -11,6 +11,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
@@ -31,6 +32,7 @@ class DefaultHarnessGuardTest {
 
         assertThat(status.passed()).isFalse();
         assertThat(status.detail()).contains("not deployed");
+        assertThat(status.deployedAt()).isEmpty();
     }
 
     @Test
@@ -39,10 +41,14 @@ class DefaultHarnessGuardTest {
         writeValidHarness(project);
         DefaultHarnessGuard guard = new DefaultHarnessGuard(forgeideHome);
 
+        Instant before = Instant.now();
         HarnessGuardPort.DeployResult result = guard.deploy(project);
 
         assertThat(result.preflightPassed()).isTrue();
-        assertThat(guard.preflightStatus(project).passed()).isTrue();
+        HarnessGuardPort.PreflightStatus status = guard.preflightStatus(project);
+        assertThat(status.passed()).isTrue();
+        // T37: the project card shows this next to the deploy button (SDD FR-1.4).
+        assertThat(status.deployedAt()).isPresent().hasValueSatisfying(at -> assertThat(at).isAfterOrEqualTo(before));
         assertThat(forgeideHome.resolve("harness-cache").resolve(result.hash())
                 .resolve("hooks").resolve("tdd-guard.py")).exists();
     }

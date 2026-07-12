@@ -59,8 +59,9 @@ public final class DefaultHarnessGuard implements HarnessGuardPort {
     public PreflightStatus preflightStatus(Path projectRoot) {
         return HarnessRegistry.read(forgeideHome, projectRoot)
                 .map(entry -> new PreflightStatus(entry.preflightPassed(),
-                        entry.preflightPassed() ? entry.preflightOutput() : notPassedDetail(entry.preflightOutput())))
-                .orElseGet(() -> new PreflightStatus(false, "harness not deployed for this project"));
+                        entry.preflightPassed() ? entry.preflightOutput() : notPassedDetail(entry.preflightOutput()),
+                        Optional.of(entry.deployedAt())))
+                .orElseGet(() -> new PreflightStatus(false, "harness not deployed for this project", Optional.empty()));
     }
 
     private static String notPassedDetail(String preflightOutput) {
