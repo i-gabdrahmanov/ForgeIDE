@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Verify git and python3 are on the runner
+        # runtime/harness tests (T16 git-scope-diff, T19 evil fixtures, DefaultHarnessGuard)
+        # shell out to `git` and `python3` and skip gracefully via JUnit Assumptions when either
+        # binary is missing. ubuntu-latest ships both, so this build is meant to actually
+        # exercise those tests, not silently skip them — fail fast here if that ever stops
+        # being true instead of finding out from a quietly-smaller test run.
+        run: |
+          git --version
+          python3 --version
+
+      - name: Build (compile, test, JaCoCo coverage verification)
+        # T09's ClaudeAgentRuntimeSmokeTest (runtime module) is EXPECTED to skip here via
+        # org.junit.jupiter.api.Assumptions: it needs a real `claude` CLI binary at
+        # /opt/homebrew/bin/claude, which this runner does not and will not have — that's by
+        # design (see the test's own doc comment). A SKIPPED result for that one test is the
+        # correct CI outcome, not a failure and not something to chase.
+        run: ./gradlew build --console=plain
+
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: "*/build/test-results/**/*.xml"
+          retention-days: 14
+
+      - name: Upload JaCoCo coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-reports
+          path: |
+            core/build/reports/jacoco/test
+            runtime/build/reports/jacoco/test
+            importer/build/reports/jacoco/test
+          retention-days: 14
+          if-no-files-found: ignore
