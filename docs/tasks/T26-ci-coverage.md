@@ -21,6 +21,27 @@
 
 ## Приёмка
 
-- [ ] push/PR запускает workflow, `./gradlew build` зелёный в CI
-- [ ] злые фикстуры T19 исполняются в CI (не отфильтрованы) — приёмка T19 §7.1 наконец выполняется буквально
-- [ ] JaCoCo-порог для core+runtime+importer зафиксирован и проходит; отчёт доступен артефактом
+- [ ] push/PR запускает workflow, `./gradlew build` зелёный в CI (workflow добавлен
+      `.github/workflows/ci.yml`, зелёный прогон `./gradlew build` подтверждён локально;
+      фактический прогон в GitHub Actions требует push и остаётся проверить после него)
+- [ ] злые фикстуры T19 исполняются в CI (не отфильтрованы) — приёмка T19 §7.1 наконец
+      выполняется буквально (workflow ничего не фильтрует, `EvilFixturesRuntimeTest` требует
+      только git — он есть на `ubuntu-latest`; подтвердить после первого реального прогона)
+- [x] JaCoCo-порог для core+runtime+importer зафиксирован и проходит; отчёт доступен артефактом
+      (пороги сняты с фактического покрытия 2026-07-12: core 84.25%→0.84, runtime 83.08%→0.83,
+      importer 90.52%→0.90; `./gradlew build` зелёный локально; workflow загружает
+      `core|runtime|importer/build/reports/jacoco/test` артефактом `jacoco-reports`)
+
+### Где что лежит
+
+- `build.gradle.kts` — JaCoCo (`jacocoTestReport` + `jacocoTestCoverageVerification`) подключён
+  для `core`/`runtime`/`importer` внутри `plugins.withId("java") { ... }` (важно: `subprojects{}`
+  корневого скрипта выполняется раньше, чем модульный `build.gradle.kts` применяет
+  `java-library`, поэтому конфигурацию JaCoCo нужно откладывать до применения `java`-плагина —
+  иначе `jacocoTestReport` ещё не зарегистрирован и `tasks.named<JacocoReport>(...)` падает с
+  `UnknownTaskException`). `ui` сознательно вне порога (см. скоуп задачи).
+- `.github/workflows/ci.yml` — триггеры `push` в `master` и `pull_request`, `ubuntu-latest`,
+  шаг с явной проверкой `git --version`/`python3 --version` перед сборкой, `./gradlew build`,
+  выгрузка `test-results` при падении и `jacoco-reports` всегда. Комментарий в шаге сборки
+  фиксирует ожидание: `ClaudeAgentRuntimeSmokeTest` (T09) штатно скипается через `Assumptions` —
+  бинаря `claude` на раннере нет и не будет.
