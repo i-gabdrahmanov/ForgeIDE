@@ -2,6 +2,7 @@ package dev.forgeide.ui.importer;
 
 import dev.forgeide.core.pipeline.PipelineDefinition;
 import dev.forgeide.core.pipeline.yaml.PipelineTemplates;
+import dev.forgeide.importer.ImportResult;
 import dev.forgeide.importer.ImportSession;
 import dev.forgeide.importer.ImportWriter;
 import dev.forgeide.importer.bind.TileBinding;
@@ -181,13 +182,28 @@ public final class ImportView extends BorderPane {
         }
     }
 
+    /** T35: a re-import must not silently clobber files touched since the last one (locally
+     * edited prompts via the T20 inspector, judge scripts). {@link ImportWriter#plan} finds out
+     * what would conflict before anything is written; only when there is nothing to confirm does
+     * import go straight through, same as before this task. */
     private void doImport() {
         if (session == null || !session.isComplete()) {
             return;
         }
         try {
-            ImportWriter.write(projectRoot, session.result());
-            onImported.run();
+            ImportResult result = session.result();
+            List<ImportWriter.FileDiff> conflicts = ImportWriter.plan(projectRoot, result).stream()
+                    .filter(diff -> diff.status() == ImportWriter.FileStatus.MODIFIED)
+                    .toList();
+            if (conflicts.isEmpty()) {
+                ImportWriter.write(projectRoot, result);
+                onImported.run();
+            } else {
+                ImportConflictDialog.show(conflicts, confirmedOverwrites -> {
+                    ImportWriter.write(projectRoot, result, confirmedOverwrites);
+                    onImported.run();
+                });
+            }
         } catch (RuntimeException ex) {
             showError("Ошибка импорта: " + ex.getMessage());
         }
