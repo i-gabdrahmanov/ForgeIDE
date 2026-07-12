@@ -18,6 +18,7 @@ import javafx.scene.control.ListCell;
 import javafx.scene.control.ListView;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
+import javafx.scene.layout.VBox;
 import javafx.scene.paint.Color;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.FileChooser;
@@ -44,6 +45,7 @@ public final class ImportView extends BorderPane {
             new ChoiceBox<>(FXCollections.observableArrayList("forgelite", "feature-pipeline"));
     private final ListView<TileBinding> bindingList = new ListView<>();
     private final Label statusLabel = new Label();
+    private final Label sizeWarningLabel = new Label();
     private final Button importButton = new Button("Импортировать");
     private final Button bindManuallyButton = new Button("Привязать вручную…");
 
@@ -63,7 +65,9 @@ public final class ImportView extends BorderPane {
 
         HBox header = new HBox(12, back, chooseSource, new Label("Шаблон:"), templateChoice, sourceLabel);
         header.setPadding(new Insets(12));
-        setTop(header);
+        sizeWarningLabel.setTextFill(Color.DARKORANGE);
+        sizeWarningLabel.setPadding(new Insets(0, 12, 12, 12));
+        setTop(new VBox(header, sizeWarningLabel));
 
         bindingList.setCellFactory(list -> new ListCell<>() {
             @Override
@@ -117,11 +121,23 @@ public final class ImportView extends BorderPane {
                     : PipelineTemplates.forgelite();
             session = new ImportSession(template, catalog);
             refreshBindings();
+            refreshSizeWarning();
         } catch (RuntimeException ex) {
             session = null;
             bindingList.setItems(FXCollections.observableArrayList());
+            sizeWarningLabel.setText(null);
             showError("Ошибка сканирования: " + ex.getMessage());
         }
+    }
+
+    /** T34: the whole skill directory now rides into the target project, so a checkout that
+     * accidentally carries a stray binary/data file is no longer silently dropped — it silently
+     * ships instead. Warn before import rather than after. */
+    private void refreshSizeWarning() {
+        List<String> oversized = session.oversizedSkills();
+        sizeWarningLabel.setText(oversized.isEmpty() ? null
+                : "Подозрительно большой скилл (>10 МБ): " + String.join(", ", oversized)
+                        + " — проверьте, не попали ли лишние бинарники/данные.");
     }
 
     private void bindSelectedManually() {

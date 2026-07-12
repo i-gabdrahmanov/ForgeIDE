@@ -226,6 +226,35 @@ class DefaultHarnessGuardTest {
         assertThat(guard.checkDrift(project)).isPresent();
     }
 
+    /** T34's acceptance: the importer now copies a skill's whole directory (not just {@code
+     * SKILL.md}) into {@code .gigacode/skills/<id>/...}, so a file that only exists to be
+     * referenced from SKILL.md's prose — never a judge target, never a hook — still has to trip
+     * the same drift detection any other harness file gets. {@link HarnessManifest#scan} already
+     * walks {@code skills/} generically; this pins that behaviour down for a {@code references/}
+     * path specifically, since no existing test exercised anything under {@code skills/} at all. */
+    @Test
+    void editingAReferencesFileUnderASkillDirTripsDrift(@TempDir Path project, @TempDir Path forgeideHome)
+            throws IOException {
+        assumePython3Available();
+        Path harness = project.resolve(".gigacode");
+        Files.createDirectories(harness.resolve("skills/demo-skill/references"));
+        Files.writeString(harness.resolve("skills/demo-skill/SKILL.md"),
+                "---\nname: demo-skill\n---\n\nSee references/notes.md\n");
+        Files.writeString(harness.resolve("skills/demo-skill/references/notes.md"), "original notes\n");
+        Files.writeString(harness.resolve("settings.hooks.json"), """
+                {"hooks": {"SubagentStop": []}}
+                """);
+        DefaultHarnessGuard guard = new DefaultHarnessGuard(forgeideHome);
+        assertThat(guard.deploy(project).preflightPassed()).isTrue();
+
+        Files.writeString(harness.resolve("skills/demo-skill/references/notes.md"), "tampered notes\n");
+
+        Optional<HarnessGuardPort.Drift> drift = guard.checkDrift(project);
+
+        assertThat(drift).isPresent();
+        assertThat(drift.get().diff()).contains("modified: skills/demo-skill/references/notes.md");
+    }
+
     private static Path vendoredHook(String name) throws URISyntaxException {
         URL resource = DefaultHarnessGuardTest.class.getResource("/forge-fixtures/hooks/" + name);
         if (resource == null) {

@@ -22,8 +22,10 @@ import java.util.stream.Stream;
  */
 public final class ScaffoldScanner {
 
-    /** Directories skipped outright — VCS/venv/build noise a real developer checkout drags in. */
-    private static final Set<String> SKIP_DIRS = Set.of(
+    /** Directories skipped outright — VCS/venv/build noise a real developer checkout drags in.
+     * Public so {@code ImportSession}'s whole-skill-directory copy (T34) filters out the same
+     * noise instead of maintaining a second list that could drift from this one. */
+    public static final Set<String> SKIP_DIRS = Set.of(
             ".git", ".venv", "__pycache__", "node_modules", "build", ".idea", ".gradle", ".gigacode-cache");
 
     private ScaffoldScanner() {
@@ -84,7 +86,10 @@ public final class ScaffoldScanner {
         }
     }
 
-    private static boolean isUnderSkippedDir(Path root, Path file) {
+    /** Whether {@code file} (or its own path, if {@code file} is itself a directory) sits under
+     * one of {@link #SKIP_DIRS} relative to {@code root} — public so a whole-directory copy (T34)
+     * can reuse the exact same noise filter the scan itself applies. */
+    public static boolean isUnderSkippedDir(Path root, Path file) {
         Path relative = root.relativize(file.getParent() == null ? file : file.getParent());
         for (Path segment : relative) {
             if (SKIP_DIRS.contains(segment.toString())) {

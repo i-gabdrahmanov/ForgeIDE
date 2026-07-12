@@ -7,6 +7,8 @@ import dev.forgeide.importer.registry.SkillsRegistryEntry;
 import dev.forgeide.importer.registry.SkillsRegistryParser;
 import dev.forgeide.importer.scaffold.PromptSection;
 import dev.forgeide.importer.scaffold.ScaffoldCatalog;
+import dev.forgeide.importer.scaffold.ScaffoldScanner;
+import dev.forgeide.importer.scaffold.SkillSizeCheck;
 import dev.forgeide.importer.scaffold.SubagentPromptSplitter;
 
 import java.io.IOException;
@@ -19,6 +21,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.stream.Stream;
 
 /**
  * One import run: binds a bundled template against a scanned scaffold, tracks which tiles a user
@@ -69,6 +72,18 @@ public final class ImportSession {
 
     public boolean isComplete() {
         return unmatched().isEmpty() && ambiguous().isEmpty();
+    }
+
+    /** T34: ids of skill directories whose on-disk footprint (minus {@link
+     * dev.forgeide.importer.scaffold.ScaffoldScanner#SKIP_DIRS} noise) exceeds {@link
+     * SkillSizeCheck#WARN_THRESHOLD_BYTES} — the whole directory rides into the target project
+     * now, so the UI surfaces this before import instead of silently dragging along a stray
+     * binary/data file. */
+    public List<String> oversizedSkills() {
+        return catalog.skillDirs().entrySet().stream()
+                .filter(e -> SkillSizeCheck.isSuspiciouslyLarge(e.getValue()))
+                .map(Map.Entry::getKey)
+                .toList();
     }
 
     /** SD §8's manual-binding fallback: the caller already ran a file dialog, this just records
@@ -145,12 +160,11 @@ public final class ImportSession {
         // preflight.py and HarnessLayout.SETTINGS_FILE / the hash-manifest expect to find it.
         catalog.hooksFile().ifPresent(hooks ->
                 files.put(Path.of(".gigacode/settings.hooks.json"), readString(hooks)));
-        catalog.skillDirs().forEach((id, dir) -> {
-            Path skillMd = dir.resolve("SKILL.md");
-            if (Files.isRegularFile(skillMd)) {
-                files.put(Path.of(".gigacode/skills/" + id + "/SKILL.md"), readString(skillMd));
-            }
-        });
+        // T34: the whole skill directory travels, not just SKILL.md — a skill whose SKILL.md
+        // references references/... or ships extra check_*.py alongside its judge-bound ones
+        // needs those files to actually exist in the target project for gigacode's
+        // autodiscovery/preflight to resolve them (SD §8, ревью импортёра 2026-07-11 №3).
+        catalog.skillDirs().forEach((id, dir) -> copySkillDir(id, dir, files));
 
         List<SkillsRegistryEntry> registry = catalog.registryFile()
                 .map(file -> SkillsRegistryParser.parse(readString(file)))
@@ -169,6 +183,23 @@ public final class ImportSession {
     private static String baseStepId(String bindingKey) {
         int dot = bindingKey.indexOf('.');
         return dot < 0 ? bindingKey : bindingKey.substring(0, dot);
+    }
+
+    /** Copies every regular file under {@code dir} (a skill directory {@code ScaffoldScanner}
+     * found) into {@code files}, keyed under {@code .gigacode/skills/<id>/...} with {@code dir}'s
+     * own relative layout preserved — same {@link ScaffoldScanner#SKIP_DIRS} noise filter the
+     * scanner itself uses, so VCS/venv/build junk that happened to sit inside the skill checkout
+     * never rides along (T34). */
+    private static void copySkillDir(String id, Path dir, Map<Path, String> files) {
+        Path base = Path.of(".gigacode/skills/" + id);
+        try (Stream<Path> walk = Files.walk(dir)) {
+            walk.filter(Files::isRegularFile)
+                    .filter(p -> !ScaffoldScanner.isUnderSkippedDir(dir, p))
+                    .sorted()
+                    .forEach(p -> files.put(base.resolve(dir.relativize(p)), readString(p)));
+        } catch (IOException e) {
+            throw new UncheckedIOException("cannot walk skill dir " + dir, e);
+        }
     }
 
     private static String readString(Path file) {
