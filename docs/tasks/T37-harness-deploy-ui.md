@@ -27,6 +27,10 @@
 ## Приёмка
 
 - [x] свежий проект: Import scaffold → Deploy harness → Start run проходит без обходных путей
+      — **аудит 2026-07-12:** для обвязки, чей `settings.hooks.json` ссылается на скрипты
+      хуков, preflight после деплоя всё же падал (см.
+      [T38](T38-import-chain-and-ci-green.md)) — с T38 цепочка закрыта сквозным
+      `ImportDeployPreflightChainTest`
 - [x] проваленный preflight показывает вывод `preflight.py` списком проблем
 - [x] карточка проекта отражает статус обвязки; прогон на `HARNESS_PREFLIGHT` ведёт пользователя к деплою
 

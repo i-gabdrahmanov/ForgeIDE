@@ -26,6 +26,10 @@
 - [x] e2e: импорт реальной обвязки → deploy → preflight ok без ручных действий —
       `ImportEndToEndTest#importingForgeliteAgainstTheSampleScaffoldProducesAValidPipeline`
       пишет в корень харнесса, что теперь и `HarnessManifest`/`preflight.py` ждут напрямую
+      — **аудит 2026-07-12: пункт был закрыт только по раскладке файлов**; реальный
+      deploy+preflight на импортированном проекте падал (скрипты хуков не ехали, preflight
+      парсил команду как путь) — дочинено в [T38](T38-import-chain-and-ci-green.md),
+      сквозной тест `ImportDeployPreflightChainTest`
 - [x] preflight на «старом» расположении печатает понятное сообщение с путём миграции —
       `DefaultHarnessGuardTest#deployingAHarnessWithSettingsAtTheOldHooksLocationFailsPreflightWithAMigrationMessage`
 - [x] ImportEndToEndTest проверяет корневой путь, старый путь не создаётся

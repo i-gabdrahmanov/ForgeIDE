@@ -158,8 +158,13 @@ public final class ImportSession {
 
         // T32: settings.hooks.json lands at the harness root, not under hooks/ — that's where
         // preflight.py and HarnessLayout.SETTINGS_FILE / the hash-manifest expect to find it.
-        catalog.hooksFile().ifPresent(hooks ->
-                files.put(Path.of(".gigacode/settings.hooks.json"), readString(hooks)));
+        // T38: and the hook scripts that config references travel with it — settings.hooks.json
+        // alone is not a deployable harness (preflight.py verifies every *.py/*.sh the config
+        // names exists under .gigacode/, and gigacode has to find them there at run time).
+        catalog.hooksFile().ifPresent(hooks -> {
+            files.put(Path.of(".gigacode/settings.hooks.json"), readString(hooks));
+            copyHookScripts(catalog.root(), hooks, files);
+        });
         // T34: the whole skill directory travels, not just SKILL.md — a skill whose SKILL.md
         // references references/... or ships extra check_*.py alongside its judge-bound ones
         // needs those files to actually exist in the target project for gigacode's
@@ -199,6 +204,29 @@ public final class ImportSession {
                     .forEach(p -> files.put(base.resolve(dir.relativize(p)), readString(p)));
         } catch (IOException e) {
             throw new UncheckedIOException("cannot walk skill dir " + dir, e);
+        }
+    }
+
+    /** Copies every file sitting under {@code hooksFile}'s directory (the scaffold's hook
+     * scripts — {@code settings.hooks.json} itself already went to the harness root) into
+     * {@code files} under {@code .gigacode/hooks/...}, {@link ScaffoldScanner#SKIP_DIRS}-filtered
+     * like {@link #copySkillDir} (T38). No-op when the config sits at the scaffold root: there
+     * is no hooks directory to speak of then, and walking the root would swallow the whole
+     * checkout. */
+    private static void copyHookScripts(Path scaffoldRoot, Path hooksFile, Map<Path, String> files) {
+        Path dir = hooksFile.getParent();
+        if (dir == null || dir.equals(scaffoldRoot)) {
+            return;
+        }
+        Path base = Path.of(".gigacode/hooks");
+        try (Stream<Path> walk = Files.walk(dir)) {
+            walk.filter(Files::isRegularFile)
+                    .filter(p -> !p.equals(hooksFile))
+                    .filter(p -> !ScaffoldScanner.isUnderSkippedDir(dir, p))
+                    .sorted()
+                    .forEach(p -> files.put(base.resolve(dir.relativize(p)), readString(p)));
+        } catch (IOException e) {
+            throw new UncheckedIOException("cannot walk hooks dir " + dir, e);
         }
     }
 

@@ -53,6 +53,47 @@ class DefaultHarnessGuardTest {
                 .resolve("hooks").resolve("tdd-guard.py")).exists();
     }
 
+    /** T38: a hook reference is routinely a whole command line, not a bare path — preflight
+     * must resolve the script token inside it instead of treating the string as one path
+     * (which rejected every valid imported config as ".gigacode/python3 hooks/..."). */
+    @Test
+    void preflightResolvesHookScriptTokensInsideCommandStrings(@TempDir Path project, @TempDir Path forgeideHome)
+            throws IOException {
+        assumePython3Available();
+        Path harness = project.resolve(".gigacode");
+        Files.createDirectories(harness.resolve("hooks"));
+        Files.writeString(harness.resolve("hooks/tdd-guard.py"), "print('guarding')\n");
+        Files.writeString(harness.resolve("settings.hooks.json"), """
+                {"hooks": {"PreToolUse": [{"matcher": "Write|Edit", "hooks": [
+                  {"type": "command", "command": "python3 hooks/tdd-guard.py"}]}]}}
+                """);
+        DefaultHarnessGuard guard = new DefaultHarnessGuard(forgeideHome);
+
+        HarnessGuardPort.DeployResult result = guard.deploy(project);
+
+        assertThat(result.preflightPassed()).as(result.preflightOutput()).isTrue();
+    }
+
+    /** T38 counterpart: when the script named inside a command string is genuinely missing,
+     * the problem message names the script token, not the whole command line. */
+    @Test
+    void preflightNamesTheMissingScriptTokenFromACommandString(@TempDir Path project, @TempDir Path forgeideHome)
+            throws IOException {
+        assumePython3Available();
+        Path harness = project.resolve(".gigacode");
+        Files.createDirectories(harness);
+        Files.writeString(harness.resolve("settings.hooks.json"), """
+                {"hooks": {"PreToolUse": [{"matcher": "Write|Edit", "hooks": [
+                  {"type": "command", "command": "python3 hooks/missing-guard.py"}]}]}}
+                """);
+        DefaultHarnessGuard guard = new DefaultHarnessGuard(forgeideHome);
+
+        HarnessGuardPort.DeployResult result = guard.deploy(project);
+
+        assertThat(result.preflightPassed()).isFalse();
+        assertThat(result.preflightOutput()).contains("not found: hooks/missing-guard.py");
+    }
+
     @Test
     void deployingAHarnessWithAMissingReferencedHookFailsPreflight(@TempDir Path project, @TempDir Path forgeideHome)
             throws IOException {
