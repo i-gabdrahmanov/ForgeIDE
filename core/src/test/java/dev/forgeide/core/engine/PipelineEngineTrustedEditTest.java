@@ -1,6 +1,7 @@
 package dev.forgeide.core.engine;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.forgeide.core.audit.AuditEvent;
 import dev.forgeide.core.engine.support.FixtureAgentRuntimePort;
@@ -21,6 +22,8 @@ import dev.forgeide.core.port.OutwardActionsPort;
 import dev.forgeide.core.port.ScopeDiffPort;
 import dev.forgeide.core.port.SecretStorePort;
 import dev.forgeide.core.port.TokenUsage;
+import dev.forgeide.core.run.FailureReason;
+import dev.forgeide.core.run.QuestionEscalationAction;
 import dev.forgeide.core.run.RunId;
 import dev.forgeide.core.run.RunStatus;
 import dev.forgeide.core.run.StepStatus;
@@ -33,8 +36,10 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static dev.forgeide.core.engine.support.Await.until;
 import static dev.forgeide.core.engine.support.Snapshots.statusOf;
@@ -43,7 +48,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * T20 acceptance: FR-8.2 (prompt edit through the trusted path applies only to the step's next
  * dispatch, audited with a diff-hash) and FR-8.3 (judge/hook script edit routes through {@link
- * dev.forgeide.core.port.HarnessGuardPort#edit}, audited as {@code harness.edited}).
+ * dev.forgeide.core.port.HarnessGuardPort#edit}, audited as {@code harness.edited}). Also covers
+ * T25/FR-10.5: the {@code pending_questions} round-limit escalation's "Повторить с новым
+ * промптом" shortcut, which is nothing but this same trusted edit composed with the existing
+ * {@code cancel} escalation answer and manual {@code RetryStep} — no new engine command.
  */
 class PipelineEngineTrustedEditTest {
 
@@ -101,6 +109,78 @@ class PipelineEngineTrustedEditTest {
             until(() -> engine.snapshot(runId).map(s -> s.status() == RunStatus.COMPLETED).orElse(false));
 
             assertThat(seenPrompts).containsExactly("Original prompt", "Original prompt", "Edited prompt, mid-run");
+        }
+    }
+
+    /**
+     * T25 end-to-end: a question-round escalation resolved with the "Повторить с новым промптом"
+     * shortcut — {@code cancel} (ends the attempt {@code FAILED(questions)}), the T20 trusted
+     * {@code PromptEdited}, then the ordinary manual {@code RetryStep} — completes the phase with
+     * the edited prompt, exactly like a plain FAILED-tile retry after an edit.
+     */
+    @Test
+    void questionEscalationEditPromptThenRetryPassesThePhase(@TempDir Path repo) throws IOException {
+        Path promptDir = repo.resolve("prompts");
+        Files.createDirectories(promptDir);
+        Path promptFile = promptDir.resolve("work.md");
+        Files.writeString(promptFile, "Original prompt");
+
+        AgentStep agent = new AgentStep("work", List.of(), "claude", Path.of("prompts/work.md"),
+                List.of(), List.of(), List.of(), RetryPolicy.DEFAULT, BUDGET);
+        PipelineDefinition definition = new PipelineDefinition("p", 1, List.of(agent));
+        InMemoryStateStore stateStore = new InMemoryStateStore();
+
+        AtomicInteger calls = new AtomicInteger();
+        // The first 3 attempts (rounds 1-2 plus the round that trips FR-10.5's limit) keep asking
+        // the same question; only the 4th — the manual retry issued after the prompt edit below —
+        // finally completes the phase.
+        FixtureAgentRuntimePort agentRuntime = new FixtureAgentRuntimePort(inv -> {
+            int call = calls.incrementAndGet();
+            ObjectNode json = MAPPER.createObjectNode();
+            json.put("step_id", "work");
+            if (call <= 3) {
+                ArrayNode questions = json.putArray("pending_questions");
+                ObjectNode q = questions.addObject();
+                q.put("id", "q1");
+                q.put("text", "Which epic?");
+                q.put("type", "text");
+            }
+            return new AgentResult(0, Optional.of(json), new TokenUsage(1, 1), Path.of("raw.log"));
+        });
+
+        try (PipelineEngine engine = new PipelineEngine(stateStore, agentRuntime, FixtureScriptRunnerPort.alwaysOk())) {
+            RunId runId = engine.start(TestProjects.minimal(repo), definition, "feature-x");
+
+            until(() -> calls.get() == 1
+                    && engine.snapshot(runId).map(s -> statusOf(s, "work") == StepStatus.WAITING_INPUT).orElse(false));
+            engine.submit(new EngineCommand.QuestionsAnswered(runId, "work", Map.of("q1", "round-1")));
+
+            until(() -> calls.get() == 2
+                    && engine.snapshot(runId).map(s -> statusOf(s, "work") == StepStatus.WAITING_INPUT).orElse(false));
+            engine.submit(new EngineCommand.QuestionsAnswered(runId, "work", Map.of("q1", "round-2")));
+
+            until(() -> calls.get() == 3
+                    && engine.snapshot(runId).map(s -> statusOf(s, "work") == StepStatus.WAITING_GATE).orElse(false));
+
+            // "Повторить с новым промптом": cancel this escalated attempt...
+            engine.submit(new EngineCommand.GateAnswered(runId, "work",
+                    QuestionEscalationAction.CANCEL.token(), "tester", Instant.now()));
+            until(() -> engine.snapshot(runId).map(s -> statusOf(s, "work") == StepStatus.FAILED).orElse(false));
+            assertThat(engine.snapshot(runId).orElseThrow().steps().stream()
+                    .filter(s -> s.stepId().equals("work")).findFirst().orElseThrow().failureReason())
+                    .contains(FailureReason.QUESTIONS);
+
+            // ...edit the prompt through the T20 trusted path...
+            engine.submit(new EngineCommand.PromptEdited(runId, "work", "Edited prompt, no more questions",
+                    "alice", Instant.now()));
+            until(() -> stateStore.audit().stream().anyMatch(e -> e.type().equals("prompt.edited")));
+            assertThat(Files.readString(promptFile)).isEqualTo("Edited prompt, no more questions");
+
+            // ...then retry, same command a FAILED tile's own button sends.
+            engine.submit(new EngineCommand.RetryStep(runId, "work"));
+            until(() -> engine.snapshot(runId).map(s -> s.status() == RunStatus.COMPLETED).orElse(false));
+
+            assertThat(calls.get()).isEqualTo(4);
         }
     }
 

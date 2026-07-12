@@ -10,6 +10,7 @@ import dev.forgeide.core.port.StateStore;
 import dev.forgeide.core.port.TileValidityChecker;
 import dev.forgeide.core.project.ProjectDefinition;
 import dev.forgeide.core.run.FailureReason;
+import dev.forgeide.core.run.QuestionEscalationAction;
 import dev.forgeide.core.run.RunId;
 import dev.forgeide.core.run.RunSnapshot;
 import dev.forgeide.core.run.RunStatus;
@@ -59,6 +60,8 @@ public final class RunView extends BorderPane {
     private final StepLogView stepLogView;
     private final CanvasView canvas;
     private final TileEditorPanel inspector;
+    private final TabPane bottom;
+    private final Tab inspectorTab;
     private final PipelineDefinition pipeline;
     private final RunExporter exporter = new RunExporter();
     private final GitScopeDiff scopeDiff = new GitScopeDiff();
@@ -114,10 +117,11 @@ public final class RunView extends BorderPane {
                 (judgeStepId, onResult) -> viewModel.requestJudgeDryRun(judgeStepId,
                         result -> onResult.accept(new TileEditorPanel.JudgeDryRunOutcome(result.passed(), result.detail()))));
 
-        TabPane bottom = new TabPane(
+        inspectorTab = new Tab("Inspector", inspector);
+        bottom = new TabPane(
                 new Tab("Timeline", timelineView),
                 new Tab("Step log", stepLogView),
-                new Tab("Inspector", inspector),
+                inspectorTab,
                 new Tab("Run history", historyView));
         bottom.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
 
@@ -212,8 +216,38 @@ public final class RunView extends BorderPane {
                     pendingGates.remove(request.stepId());
                     openGateDialogs.remove(request.stepId());
                 },
-                () -> openGateDialogs.remove(request.stepId()));
+                () -> openGateDialogs.remove(request.stepId()),
+                () -> openPromptEditor(request.stepId()),
+                () -> retryQuestionEscalation(request.stepId()));
         openGateDialogs.put(request.stepId(), stage);
+    }
+
+    /** T25/FR-10.5: the question-escalation's "open prompt" link dismisses the dialog like any
+     * other deferred gate answer and lands here instead — shown directly on the existing {@code
+     * inspector}, not via {@code canvas.selectedStepProperty()}, because that listener would
+     * immediately reopen the very dialog we just dismissed (the step is still {@code
+     * WAITING_GATE} and still in {@code pendingGates}). */
+    private void openPromptEditor(String stepId) {
+        try {
+            StepDefinition def = pipeline.step(stepId);
+            selectedStep = def;
+            inspector.show(def, List.of(), TileValidityChecker.unknown().check(def));
+            bottom.getSelectionModel().select(inspectorTab);
+        } catch (NoSuchElementException notInStaticDefinition) {
+            // A per_task_loop-unrolled step instance has no entry in the static PipelineDefinition
+            // this view was built from — same known gap as showLog().
+        }
+    }
+
+    /** T25's "Повторить с новым промптом": composes the existing {@code cancel} gate answer (ends
+     * this escalated attempt as {@code FAILED(questions)}) with the existing manual-retry command
+     * — both already submitted to the same single-threaded engine mailbox, so the retry is always
+     * processed after the cancel lands. No new engine command. */
+    private void retryQuestionEscalation(String stepId) {
+        viewModel.answerGate(stepId, QuestionEscalationAction.CANCEL.token(), Optional.empty(), false);
+        viewModel.retry(stepId);
+        pendingGates.remove(stepId);
+        openGateDialogs.remove(stepId);
     }
 
     /** A step that left {@code WAITING_GATE} (answered from this or another IDE instance, or

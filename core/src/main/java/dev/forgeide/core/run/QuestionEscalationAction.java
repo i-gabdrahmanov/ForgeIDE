@@ -10,9 +10,11 @@ import java.util.Optional;
  * shared dialog infrastructure a {@code GateStep} and a judge escalation (FR-11.3) answer with
  * ({@code EscalationAction}).
  *
- * <p>{@code OPEN_PROMPT} never reaches the engine: T20 (the prompt editor) is out of this task's
- * scope, so the UI renders it as an informational stub link rather than a submittable answer
- * (see {@code GateDialog}). The engine refuses it defensively if it ever arrives anyway.
+ * <p>{@code OPEN_PROMPT} never reaches the engine: T25 has the UI treat it like a deferred gate
+ * answer (dismiss, no {@code GateAnswered} submitted) and navigate to the T20 prompt editor for
+ * the escalated step locally instead — the escalation stays reopenable from the canvas exactly
+ * like any other dismissed {@code WAITING_GATE} (see {@code GateDialog}). The engine refuses this
+ * token defensively if it ever arrives anyway.
  */
 public enum QuestionEscalationAction {
     OPEN_PROMPT("open_prompt"),
