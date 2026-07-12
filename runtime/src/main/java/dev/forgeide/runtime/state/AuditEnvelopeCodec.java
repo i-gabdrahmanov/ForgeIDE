@@ -35,7 +35,8 @@ final class AuditEnvelopeCodec {
         long seq = node.get("seq").asLong();
         Instant ts = Instant.parse(node.get("ts").asText());
         RunId runId = new RunId(node.get("run").asText());
-        String stepId = node.get("step").asText();
+        JsonNode stepNode = node.get("step");
+        String stepId = stepNode == null || stepNode.isNull() ? null : stepNode.asText();
         int iter = node.get("iter").asInt();
         String type = node.get("type").asText();
         JsonNode payload = node.get("payload");
