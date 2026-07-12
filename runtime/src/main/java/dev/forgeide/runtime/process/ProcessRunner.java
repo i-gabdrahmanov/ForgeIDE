@@ -17,6 +17,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -33,6 +34,8 @@ import java.util.function.Consumer;
  * caps by killing the whole process group, and sweeping orphans a killed phase left behind.
  * Everything about what the output <em>means</em> (stream-json shapes, artifact contracts,
  * success criteria) is the caller's job (T09) — see {@link ParsedLine}/{@link ProcessOutcome}.
+ * Every {@link ProcessSpec} passes through a {@link PhaseSandbox} before launch (SDD §8, T29);
+ * the default {@link NoSandbox} keeps today's behavior byte-for-byte.
  */
 public final class ProcessRunner implements ProcessSweepPort {
 
@@ -40,6 +43,16 @@ public final class ProcessRunner implements ProcessSweepPort {
     public static final long DEFAULT_MAX_OUTPUT_BYTES = 512L * 1024 * 1024;
 
     private static final Logger log = LoggerFactory.getLogger(ProcessRunner.class);
+
+    private final PhaseSandbox sandbox;
+
+    public ProcessRunner() {
+        this(NoSandbox.INSTANCE);
+    }
+
+    public ProcessRunner(PhaseSandbox sandbox) {
+        this.sandbox = Objects.requireNonNull(sandbox, "sandbox");
+    }
 
     /**
      * Runs {@code spec} to completion: writes/closes stdin, drains stdout/stderr on their own
@@ -57,12 +70,13 @@ public final class ProcessRunner implements ProcessSweepPort {
      *                     ProcessKillSignal}
      */
     public ProcessOutcome run(ProcessSpec spec, Consumer<ParsedLine> onStdoutLine, Consumer<String> onStderrLine) {
+        ProcessSpec launchSpec = sandbox.wrap(spec);
         Instant start = Instant.now();
         ProcessGroupLauncher.Launched launched;
         try {
-            launched = ProcessGroupLauncher.start(spec.workingDir(), spec.command(), spec.env());
+            launched = ProcessGroupLauncher.start(launchSpec.workingDir(), launchSpec.command(), launchSpec.env());
         } catch (IOException e) {
-            throw new ProcessLaunchException("cannot start process: " + spec.command(), e);
+            throw new ProcessLaunchException("cannot start process: " + launchSpec.command(), e);
         }
 
         Process process = launched.process();
@@ -79,13 +93,13 @@ public final class ProcessRunner implements ProcessSweepPort {
         };
 
         try (ExecutorService pumps = Executors.newVirtualThreadPerTaskExecutor()) {
-            Future<?> stdinFuture = pumps.submit(() -> writeStdin(process, spec.stdin()));
-            Future<?> stdoutFuture = pumps.submit(() -> pumpStdout(process, spec, onStdoutLine,
+            Future<?> stdinFuture = pumps.submit(() -> writeStdin(process, launchSpec.stdin()));
+            Future<?> stdoutFuture = pumps.submit(() -> pumpStdout(process, launchSpec, onStdoutLine,
                     outputBytes, capExceeded, kill));
-            Future<?> stderrFuture = pumps.submit(() -> pumpStderr(process, spec, onStderrLine,
+            Future<?> stderrFuture = pumps.submit(() -> pumpStderr(process, launchSpec, onStderrLine,
                     outputBytes, capExceeded, kill));
 
-            boolean finishedInTime = awaitWithinTimeout(process, spec.timeout());
+            boolean finishedInTime = awaitWithinTimeout(process, launchSpec.timeout());
             if (!finishedInTime) {
                 timedOut.set(true);
                 kill.run();

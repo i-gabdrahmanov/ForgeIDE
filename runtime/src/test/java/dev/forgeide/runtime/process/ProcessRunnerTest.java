@@ -183,6 +183,22 @@ class ProcessRunnerTest {
         assertThat(lines).hasSize(1);
     }
 
+    @Test
+    void phaseSandboxWrapRewritesTheCommandBeforeLaunch(@TempDir Path dir) {
+        ProcessSpec original = spec(dir, List.of("/bin/sh", "-c", "echo original"),
+                Duration.ofSeconds(5), ProcessRunner.DEFAULT_MAX_OUTPUT_BYTES);
+        PhaseSandbox fixture = s -> new ProcessSpec(s.workingDir(), List.of("/bin/sh", "-c", "echo wrapped"),
+                s.env(), s.stdin(), s.timeout(), s.maxOutputBytes(), s.stdoutLog(), s.stderrLog());
+        ProcessRunner sandboxedRunner = new ProcessRunner(fixture);
+        List<ParsedLine> lines = new CopyOnWriteArrayList<>();
+
+        ProcessOutcome outcome = sandboxedRunner.run(original, lines::add, l -> { });
+
+        assertThat(outcome.exitCode()).isZero();
+        assertThat(lines).hasSize(1);
+        assertThat(rawText(lines.get(0))).isEqualTo("wrapped");
+    }
+
     private static String rawText(ParsedLine line) {
         if (line instanceof ParsedLine.Raw raw) {
             return raw.line();
