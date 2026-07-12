@@ -830,8 +830,10 @@ public final class PipelineEngine implements AutoCloseable {
 
     /** FR-10.5 round-limit escalation resolution. {@code split_step}/{@code cancel} both end the
      * phase attempt as {@code FAILED(questions)} (Т-15: "эскалация как FAIL") — a human can still
-     * manually retry, which resets the round budget; {@code open_prompt} never legitimately
-     * reaches here (see {@link QuestionEscalationAction}'s javadoc). */
+     * manually retry (T25's "Повторить с новым промптом" composes exactly that {@code cancel}
+     * with a {@code PromptEdited}/{@code RetryStep} pair, no new command needed); {@code
+     * open_prompt} never legitimately reaches here (see {@link QuestionEscalationAction}'s
+     * javadoc — the UI dismisses and opens the editor locally instead of answering the gate). */
     private boolean handleQuestionEscalationAnswer(RunContext ctx, StepRun sr, EngineCommand.GateAnswered cmd) {
         Optional<QuestionEscalationAction> action = QuestionEscalationAction.fromToken(cmd.answer());
         if (action.isEmpty()) {
@@ -840,7 +842,8 @@ public final class PipelineEngine implements AutoCloseable {
         }
         if (action.get() == QuestionEscalationAction.OPEN_PROMPT) {
             log.warn("open_prompt question-escalation answer reached the engine for step {} — "
-                    + "T20's prompt editor is out of scope, refusing", cmd.stepId());
+                    + "the UI never submits this as a gate answer (T25: it dismisses and opens the "
+                    + "editor instead), refusing defensively", cmd.stepId());
             return false;
         }
         audit(ctx, cmd.stepId(), sr.iteration(), "gate.answered", gateAnsweredPayload(cmd));
