@@ -23,6 +23,26 @@
 
 ## Приёмка
 
-- [ ] e2e: импорт реальной обвязки → deploy → preflight ok без ручных действий
-- [ ] preflight на «старом» расположении печатает понятное сообщение с путём миграции
-- [ ] ImportEndToEndTest проверяет корневой путь, старый путь не создаётся
+- [x] e2e: импорт реальной обвязки → deploy → preflight ok без ручных действий —
+      `ImportEndToEndTest#importingForgeliteAgainstTheSampleScaffoldProducesAValidPipeline`
+      пишет в корень харнесса, что теперь и `HarnessManifest`/`preflight.py` ждут напрямую
+- [x] preflight на «старом» расположении печатает понятное сообщение с путём миграции —
+      `DefaultHarnessGuardTest#deployingAHarnessWithSettingsAtTheOldHooksLocationFailsPreflightWithAMigrationMessage`
+- [x] ImportEndToEndTest проверяет корневой путь, старый путь не создаётся
+
+## Реализация
+
+- **`ImportSession.result()`** писал `settings.hooks.json` под
+  `.gigacode/hooks/`; изменено на `.gigacode/settings.hooks.json` (корень харнесса) —
+  тот же путь, что `HarnessLayout.SETTINGS_FILE`, `HarnessManifest.scan` и `preflight.py`
+  уже используют. Формат/содержимое файла не менялись — только путь назначения при записи.
+- **`preflight.py`**: если `<harness>/settings.hooks.json` не найден, но существует
+  `<harness>/hooks/settings.hooks.json`, сообщение явно называет оба пути и просит перенести
+  файл в корень (вместо общего «missing settings.hooks.json»); наведён на этот файл через
+  `docs/tasks/T32-hooks-path-unification.md`.
+- **`ImportEndToEndTest`**: добавлена проверка `doesNotExist()` на старый путь рядом с
+  `isRegularFile()` на новый, чтобы регресс на старое поведение падал явно.
+- **`docs/manual.md`**: убраны предупреждения/обходной путь про «settings.hooks.json ложится
+  не туда» (были актуальны только пока баг не пофикшен); строка про `HARNESS_PREFLIGHT` в
+  §12 и обходной путь в §5 теперь описывают только миграцию уже импортированных до T32
+  проектов (preflight сам укажет путь переноса).

@@ -31,7 +31,17 @@ def _check(project: Path) -> list[str]:
         problems.append(f"missing harness directory: {harness}")
         return problems
     if not settings.is_file():
-        problems.append(f"missing {settings}")
+        legacy = harness / "hooks" / "settings.hooks.json"
+        if legacy.is_file():
+            # T32: older imports wrote settings.hooks.json under hooks/ instead of the harness
+            # root, where this script (and the hash-manifest) actually look for it.
+            problems.append(
+                f"{settings} not found, but found {legacy} — this project was imported "
+                f"before settings.hooks.json moved to the harness root; move it to {settings} "
+                "to fix (see docs/tasks/T32-hooks-path-unification.md)"
+            )
+        else:
+            problems.append(f"missing {settings}")
         return problems
 
     try:
