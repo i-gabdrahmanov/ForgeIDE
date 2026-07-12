@@ -46,17 +46,26 @@ public record ImportManifest(Map<String, String> stepToRegistryId) {
         }
     }
 
-    public void write(Path file) {
+    /** JSON text this manifest would write — exposed so {@link ImportWriter} can diff it against
+     * what is already on disk before touching anything (T35). */
+    public String toJson() {
         ObjectMapper mapper = new ObjectMapper();
         ObjectNode root = mapper.createObjectNode();
         ObjectNode mapping = root.putObject("stepToRegistryId");
         stepToRegistryId.forEach(mapping::put);
         try {
+            return mapper.writerWithDefaultPrettyPrinter().writeValueAsString(root);
+        } catch (IOException e) {
+            throw new UncheckedIOException("cannot serialize import manifest", e);
+        }
+    }
+
+    public void write(Path file) {
+        try {
             if (file.getParent() != null) {
                 Files.createDirectories(file.getParent());
             }
-            Files.writeString(file, mapper.writerWithDefaultPrettyPrinter().writeValueAsString(root),
-                    StandardCharsets.UTF_8);
+            Files.writeString(file, toJson(), StandardCharsets.UTF_8);
         } catch (IOException e) {
             throw new UncheckedIOException("cannot write " + file, e);
         }
