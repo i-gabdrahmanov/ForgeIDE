@@ -3,6 +3,7 @@ package dev.forgeide.importer.scaffold;
 import java.nio.file.Path;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.regex.Pattern;
 
 /**
  * One markdown-heading-delimited slice of a {@code subagent-prompts.md} contract file (SD §8:
@@ -34,5 +35,18 @@ public record PromptSection(Path sourceFile, int level, String heading, Optional
      * free-form prose into step semantics; this is a literal id-in-title check, not that). */
     public boolean mentions(String stepId) {
         return heading.toLowerCase(java.util.Locale.ROOT).contains(stepId.toLowerCase(java.util.Locale.ROOT));
+    }
+
+    /** Case-insensitive match of {@code stepId} as a standalone token in the heading, not merely
+     * as a substring of some longer id (T33, ревью импортёра 2026-07-11 №2: {@code fp-red} must
+     * not match a heading about {@code fp-red-fix} while an exact {@code fp-red} heading exists).
+     * {@code -}/{@code _}/alphanumerics count as id characters, so the check looks at what's
+     * immediately before/after the match rather than {@code \b} (which would treat the hyphen in
+     * {@code fp-red-fix} as a boundary and match anyway). {@code ImportBinder} prefers this over
+     * {@link #mentions} whenever any section token-matches, falling back to substring matching
+     * only when none do. */
+    public boolean mentionsAsToken(String stepId) {
+        Pattern token = Pattern.compile("(?i)(?<![\\w-])" + Pattern.quote(stepId) + "(?![\\w-])");
+        return token.matcher(heading).find();
     }
 }
