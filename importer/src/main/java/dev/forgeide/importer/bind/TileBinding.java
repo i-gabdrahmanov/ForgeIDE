@@ -1,6 +1,9 @@
 package dev.forgeide.importer.bind;
 
+import dev.forgeide.importer.scaffold.PromptSection;
+
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -41,6 +44,27 @@ public sealed interface TileBinding {
             Objects.requireNonNull(key, "key");
             Objects.requireNonNull(targetPath, "targetPath");
             Objects.requireNonNull(hint, "hint");
+        }
+    }
+
+    /**
+     * T33 (SD §8, ревью импортёра 2026-07-11 №2): {@link ImportBinder} found more than one
+     * {@link PromptSection} whose heading mentions the step id and refuses to guess by picking
+     * the first one — the user resolves it by choosing a candidate ({@code
+     * ImportSession.resolveAmbiguous}), same §-section picker manual binding uses for a
+     * heading-bearing file.
+     *
+     * @param candidates every section that matched, in scan order — always at least two
+     */
+    record Ambiguous(String key, Path targetPath, List<PromptSection> candidates) implements TileBinding {
+        public Ambiguous {
+            Objects.requireNonNull(key, "key");
+            Objects.requireNonNull(targetPath, "targetPath");
+            candidates = List.copyOf(candidates);
+            if (candidates.size() < 2) {
+                throw new IllegalArgumentException(
+                        "ambiguous binding needs at least 2 candidates, got " + candidates.size());
+            }
         }
     }
 }

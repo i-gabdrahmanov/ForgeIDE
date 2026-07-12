@@ -29,7 +29,11 @@ import java.util.Optional;
  * the template already names. This is the one deliberately narrow convention T24 commits to —
  * anything a real scaffold names differently comes back {@link TileBinding.Unmatched} for the
  * user to point at manually, rather than the importer guessing harder (SD §8 explicitly rules out
- * parsing free prose into step semantics).
+ * parsing free prose into step semantics). T33 tightens the prompt side of this: a step id
+ * matching more than one section's heading comes back {@link TileBinding.Ambiguous} instead of
+ * silently binding the first hit, and an id that is a standalone token in one heading is
+ * preferred over an id that is merely a substring of a longer one in another (SD §8, ревью
+ * импортёра 2026-07-11 №2).
  */
 public final class ImportBinder {
 
@@ -66,14 +70,25 @@ public final class ImportBinder {
     }
 
     private static TileBinding bindPrompt(String key, String searchTerm, Path targetPath, ScaffoldCatalog catalog) {
-        Optional<PromptSection> match = catalog.promptSections().stream()
-                .filter(s -> s.mentions(searchTerm))
-                .findFirst();
-        if (match.isPresent()) {
-            return new TileBinding.Matched(key, targetPath, match.get().sourceFile(), match.get().body());
+        List<PromptSection> tokenMatches = catalog.promptSections().stream()
+                .filter(s -> s.mentionsAsToken(searchTerm))
+                .toList();
+        // T33: an exact token match (e.g. a heading literally about "fp-red") always wins over a
+        // heading that merely contains the id as a substring of something longer (e.g.
+        // "fp-red-fix") — only fall back to substring matching when nothing token-matches.
+        List<PromptSection> candidates = tokenMatches.isEmpty()
+                ? catalog.promptSections().stream().filter(s -> s.mentions(searchTerm)).toList()
+                : tokenMatches;
+
+        if (candidates.isEmpty()) {
+            return new TileBinding.Unmatched(key, targetPath,
+                    "не найден заголовок в subagent-prompts.md, упоминающий '" + searchTerm + "'");
         }
-        return new TileBinding.Unmatched(key, targetPath,
-                "не найден заголовок в subagent-prompts.md, упоминающий '" + searchTerm + "'");
+        if (candidates.size() > 1) {
+            return new TileBinding.Ambiguous(key, targetPath, candidates);
+        }
+        PromptSection match = candidates.get(0);
+        return new TileBinding.Matched(key, targetPath, match.sourceFile(), match.body());
     }
 
     private static TileBinding bindScript(String key, List<String> command, ScaffoldCatalog catalog) {

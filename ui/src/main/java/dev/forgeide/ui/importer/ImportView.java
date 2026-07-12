@@ -5,6 +5,7 @@ import dev.forgeide.core.pipeline.yaml.PipelineTemplates;
 import dev.forgeide.importer.ImportSession;
 import dev.forgeide.importer.ImportWriter;
 import dev.forgeide.importer.bind.TileBinding;
+import dev.forgeide.importer.scaffold.PromptSection;
 import dev.forgeide.importer.scaffold.ScaffoldCatalog;
 import dev.forgeide.importer.scaffold.ScaffoldScanner;
 import javafx.collections.FXCollections;
@@ -24,6 +25,7 @@ import javafx.stage.Window;
 
 import java.io.File;
 import java.nio.file.Path;
+import java.util.List;
 
 /**
  * T24: scan a Forge-обвязка checkout, bind it against a bundled template, highlight anything
@@ -43,7 +45,7 @@ public final class ImportView extends BorderPane {
     private final ListView<TileBinding> bindingList = new ListView<>();
     private final Label statusLabel = new Label();
     private final Button importButton = new Button("Импортировать");
-    private final Button bindManuallyButton = new Button("Выбрать файл вручную…");
+    private final Button bindManuallyButton = new Button("Привязать вручную…");
 
     private Path sourceRoot;
     private ImportSession session;
@@ -72,7 +74,8 @@ public final class ImportView extends BorderPane {
                     setTextFill(Color.BLACK);
                 } else {
                     setText(ImportRowPresentation.rowText(binding));
-                    setTextFill(ImportRowPresentation.isMatched(binding) ? Color.SEAGREEN : Color.FIREBRICK);
+                    setTextFill(ImportRowPresentation.isMatched(binding) ? Color.SEAGREEN
+                            : ImportRowPresentation.isAmbiguous(binding) ? Color.DARKORANGE : Color.FIREBRICK);
                 }
             }
         });
@@ -126,15 +129,37 @@ public final class ImportView extends BorderPane {
         if (selected == null || session == null) {
             return;
         }
+        // T33: an ambiguous auto-match already has its candidate sections — resolve by picking
+        // one instead of running a file dialog that would just re-derive the same list.
+        if (selected instanceof TileBinding.Ambiguous ambiguous) {
+            SectionPickerDialog.show("Неоднозначный матч — " + ambiguous.key(), ambiguous.candidates(),
+                    chosen -> {
+                        session.resolveAmbiguous(ambiguous.key(), chosen);
+                        refreshBindings();
+                    });
+            return;
+        }
+
         FileChooser chooser = new FileChooser();
         chooser.setTitle("Выбрать файл для " + selected.key());
         File file = chooser.showOpenDialog(windowOf(this));
         if (file == null) {
             return;
         }
+        Path chosenFile = file.toPath();
         try {
-            session.bindManually(selected.key(), file.toPath());
-            refreshBindings();
+            // T33: a heading-bearing markdown file (e.g. another subagent-prompts.md) gets a
+            // §-section picker so the tile only gets that section's body, not the whole file.
+            List<PromptSection> sections = ImportSession.sectionsOf(chosenFile);
+            if (sections.isEmpty()) {
+                session.bindManually(selected.key(), chosenFile);
+                refreshBindings();
+            } else {
+                SectionPickerDialog.show("§-секция для " + selected.key(), sections, chosen -> {
+                    session.bindManuallyToSection(selected.key(), chosen);
+                    refreshBindings();
+                });
+            }
         } catch (RuntimeException ex) {
             showError("Не удалось привязать файл: " + ex.getMessage());
         }
