@@ -67,6 +67,33 @@ class ImportEndToEndTest {
                 .anyMatch(line -> line.strip().equals("ground/ai-logs/"));
     }
 
+    /** T34 acceptance: {@code .gigacode/skills/forgelite/} matches the source directory file for
+     * file (minus SKIP_DIRS noise), and a {@code SKILL.md} referencing {@code references/...}
+     * resolves against what actually landed on disk in the target project. */
+    @Test
+    void importCopiesTheWholeSkillDirectoryAndSkillMdReferencesResolve(@TempDir Path projectRoot) throws java.io.IOException {
+        Path scaffoldRoot = fixture("sample-scaffold");
+        ScaffoldCatalog catalog = ScaffoldScanner.scan(scaffoldRoot);
+        ImportResult result = new ImportSession(PipelineTemplates.forgelite(), catalog).result();
+        ImportWriter.write(projectRoot, result);
+
+        Path sourceSkillDir = scaffoldRoot.resolve("skills/forgelite");
+        Path targetSkillDir = projectRoot.resolve(".gigacode/skills/forgelite");
+
+        assertThat(targetSkillDir.resolve("references/subagent-prompts.md"))
+                .hasSameTextualContentAs(sourceSkillDir.resolve("references/subagent-prompts.md"));
+        assertThat(targetSkillDir.resolve("scripts/check_tests_red.py"))
+                .hasSameTextualContentAs(sourceSkillDir.resolve("scripts/check_tests_red.py"));
+        assertThat(targetSkillDir.resolve("scripts/check_coverage.py"))
+                .hasSameTextualContentAs(sourceSkillDir.resolve("scripts/check_coverage.py"));
+        // SKIP_DIRS noise (same list ScaffoldScanner itself filters) must never ride along.
+        assertThat(targetSkillDir.resolve("__pycache__")).doesNotExist();
+
+        String skillMd = Files.readString(targetSkillDir.resolve("SKILL.md"));
+        assertThat(skillMd).contains("references/subagent-prompts.md");
+        assertThat(targetSkillDir.resolve("references/subagent-prompts.md")).isRegularFile();
+    }
+
     @Test
     void deployAppendsTheAiLogsEntryToAnExistingGitignoreWithoutDuplicatingOnReimport(
             @TempDir Path projectRoot) throws java.io.IOException {

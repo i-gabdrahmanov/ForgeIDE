@@ -8,18 +8,22 @@ import dev.forgeide.core.policy.TokenBudget;
 import dev.forgeide.importer.scaffold.PromptSection;
 import dev.forgeide.importer.scaffold.ScaffoldCatalog;
 import dev.forgeide.importer.scaffold.ScaffoldScanner;
+import dev.forgeide.importer.scaffold.SkillSizeCheck;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -36,6 +40,101 @@ class ImportSessionTest {
         assertThat(session.isComplete()).isTrue();
         assertThat(session.unmatched()).isEmpty();
         assertThat(session.bindings()).hasSize(6);
+    }
+
+    /** T34: the whole {@code skills/forgelite/} directory rides along, not just {@code SKILL.md}
+     * — a {@code references/subagent-prompts.md} the SKILL.md prose points at must actually land
+     * in the target project, while VCS/build noise (same {@code ScaffoldScanner.SKIP_DIRS} list
+     * as the scanner itself) never does. */
+    @Test
+    void resultCopiesTheWholeSkillDirectoryNotJustSkillMd() throws IOException {
+        ImportSession session = new ImportSession(PipelineTemplates.forgelite(), catalog);
+
+        ImportResult result = session.result();
+
+        Path referencesTarget = Path.of(".gigacode/skills/forgelite/references/subagent-prompts.md");
+        assertThat(result.files()).containsKey(referencesTarget);
+        assertThat(result.files().get(referencesTarget)).isEqualTo(
+                Files.readString(fixtureRoot.resolve("skills/forgelite/references/subagent-prompts.md"),
+                        StandardCharsets.UTF_8));
+        assertThat(result.files().keySet())
+                .noneMatch(path -> path.toString().contains("__pycache__"));
+    }
+
+    /** T34 acceptance: a copied SKILL.md that references {@code references/...} must have that
+     * reference actually resolve relative to where SKILL.md itself lands. */
+    @Test
+    void copiedSkillMdReferenceToReferencesResolvesAmongTheCopiedFiles() {
+        ImportSession session = new ImportSession(PipelineTemplates.forgelite(), catalog);
+
+        ImportResult result = session.result();
+
+        Path skillMdTarget = Path.of(".gigacode/skills/forgelite/SKILL.md");
+        assertThat(result.files().get(skillMdTarget)).contains("references/subagent-prompts.md");
+        assertThat(result.files()).containsKey(
+                skillMdTarget.getParent().resolve("references/subagent-prompts.md"));
+    }
+
+    @Test
+    void oversizedSkillsIsEmptyForTheOrdinarySampleScaffold() {
+        ImportSession session = new ImportSession(PipelineTemplates.forgelite(), catalog);
+
+        assertThat(session.oversizedSkills()).isEmpty();
+    }
+
+    /** T34: the whole-directory copy means a stray large file inside a skill checkout now rides
+     * along into the target project — {@link ImportSession#oversizedSkills()} is how the UI
+     * warns about that before import happens. */
+    @Test
+    void oversizedSkillsFlagsASkillDirectoryLargerThanTheWarnThreshold(@TempDir Path tmp) throws IOException {
+        Path skillDir = tmp.resolve("skills/big-skill");
+        Files.createDirectories(skillDir);
+        Files.writeString(skillDir.resolve("SKILL.md"), "---\nname: big-skill\n---\n", StandardCharsets.UTF_8);
+        writeFileOfSize(skillDir.resolve("blob.bin"), SkillSizeCheck.WARN_THRESHOLD_BYTES + 1);
+        ScaffoldCatalog bigCatalog = ScaffoldScanner.scan(tmp);
+        ImportSession session = new ImportSession(new PipelineDefinition("fixture", 1, List.of()), bigCatalog);
+
+        assertThat(session.oversizedSkills()).containsExactly("big-skill");
+    }
+
+    private static void writeFileOfSize(Path file, long size) throws IOException {
+        byte[] chunk = new byte[64 * 1024];
+        try (var out = Files.newOutputStream(file)) {
+            long written = 0;
+            while (written < size) {
+                int toWrite = (int) Math.min(chunk.length, size - written);
+                out.write(chunk, 0, toWrite);
+                written += toWrite;
+            }
+        }
+    }
+
+    /** Guards {@code copySkillDir}'s error wrapping: a skill directory that vanishes between the
+     * scan and {@link ImportSession#result()} (e.g. concurrent edit of the source checkout) must
+     * surface as an {@link java.io.UncheckedIOException}, not a raw {@code NoSuchFileException}
+     * leaking out of a lambda. */
+    @Test
+    void resultWrapsAnIoFailureWhileCopyingASkillDirectoryThatDisappeared(@TempDir Path tmp) throws IOException {
+        Path skillDir = tmp.resolve("skills/vanishing");
+        Files.createDirectories(skillDir);
+        Files.writeString(skillDir.resolve("SKILL.md"), "---\nname: vanishing\n---\n", StandardCharsets.UTF_8);
+        ScaffoldCatalog vanishingCatalog = ScaffoldScanner.scan(tmp);
+        ImportSession session = new ImportSession(new PipelineDefinition("fixture", 1, List.of()), vanishingCatalog);
+        deleteRecursively(skillDir);
+
+        assertThatThrownBy(session::result).isInstanceOf(UncheckedIOException.class);
+    }
+
+    private static void deleteRecursively(Path dir) throws IOException {
+        try (Stream<Path> walk = Files.walk(dir)) {
+            walk.sorted(Comparator.reverseOrder()).forEach(p -> {
+                try {
+                    Files.delete(p);
+                } catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+            });
+        }
     }
 
     @Test
