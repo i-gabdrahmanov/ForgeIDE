@@ -20,8 +20,21 @@
 
 - Инсталляторы, подпись, нотаризация; Windows (пост-MVP по NFR-5).
 
+## Решение
+
+Вариант 1 (per-OS артефакты). `./gradlew :ui:platformDistZips` собирает
+`ui-<version>-mac-aarch64.zip` и `ui-<version>-linux-x64.zip` на одной машине:
+каждый таргет резолвит `org.openjfx:javafx-*` через platform/arch-атрибуты
+конфигурации (`org.gradle.native.operatingSystem`/`architecture`) — тот же
+механизм, что и сам javafx-gradle-plugin, без classifier-нотации (она
+конфликтует с variant-based резолюцией и падает с ambiguity). См.
+`ui/build.gradle.kts`.
+
 ## Приёмка
 
-- [ ] README покрывает запуск с нуля на чистой машине (macOS и Linux) — проверка по шагам
-- [ ] артефакты дистрибуции либо per-OS с платформой в имени, либо jlink-образ на обе ОС
-- [ ] `:ui:run` и запуск из дистрибутива работают по инструкции README
+- [x] README покрывает запуск с нуля на чистой машине (macOS и Linux) — проверка по шагам
+- [x] артефакты дистрибуции либо per-OS с платформой в имени, либо jlink-образ на обе ОС
+- [x] `:ui:run` и запуск из дистрибутива работают по инструкции README —
+      mac-aarch64 запущен локально (реальное окно JavaFX), linux-x64 проверен
+      в Linux x86_64 контейнере (Xvfb, окно "ForgeIDE" отрендерилось, скриншот
+      подтверждён)
