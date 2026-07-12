@@ -108,6 +108,53 @@ class GitScopeDiffPipelineTest {
         }
     }
 
+    /**
+     * T36 acceptance (SR-6/Т-13; ревью импортёра 2026-07-11 №5): a real dirty tree at run start —
+     * a tracked file modified but not committed before {@code engine.start} — must produce a
+     * non-blocking {@code run.dirty_tree} audit entry naming it, exercised against the real {@code
+     * git} binary rather than a fake {@link dev.forgeide.core.port.ScopeDiffPort}.
+     */
+    @Test
+    void treeAlreadyDirtyAtRunStartEmitsAWarningAndDoesNotBlockTheRun(
+            @TempDir Path repo, @TempDir Path stateDir) throws IOException, InterruptedException {
+        assumeGitAvailable();
+        run(repo, "init", "-q", ".");
+        run(repo, "config", "user.email", "test@example.com");
+        run(repo, "config", "user.name", "Test");
+        Files.writeString(repo.resolve("README.md"), "one\n");
+        run(repo, "add", "README.md");
+        run(repo, "commit", "-q", "-m", "initial");
+        Files.writeString(repo.resolve("README.md"), "two, uncommitted\n");
+
+        dev.forgeide.core.pipeline.ScriptStep noop = new dev.forgeide.core.pipeline.ScriptStep(
+                "noop", List.of(), List.of("true"), Duration.ofSeconds(5));
+        PipelineDefinition definition = new PipelineDefinition("p", 1, List.of(noop));
+
+        ProjectDefinition project = new ProjectDefinition(ProjectId.newId(), "dirty-tree-test", repo,
+                List.of(), Map.of(), CriticalityProfile.LOW,
+                List.of(new RuntimeBinding("claude", Path.of("/usr/bin/claude"))));
+
+        FileStateStore stateStore = new FileStateStore(stateDir);
+        GitScopeDiff scopeDiff = new GitScopeDiff();
+
+        try (PipelineEngine engine = new PipelineEngine(stateStore,
+                (invocation, onEvent) -> { throw new AssertionError("no agent steps in this pipeline"); },
+                inv -> new dev.forgeide.core.port.ScriptResult(0, "ok", ""),
+                ManifestProjectorPort.NOOP, scopeDiff, SecretStorePort.NOOP)) {
+            RunId runId = engine.start(project, definition, "feature-x");
+
+            until(() -> engine.snapshot(runId)
+                    .map(s -> s.status() == dev.forgeide.core.run.RunStatus.COMPLETED)
+                    .orElse(false));
+
+            AuditEvent warning = stateStore.loadAudit(runId).stream()
+                    .filter(e -> e.type().equals("run.dirty_tree")).findFirst().orElseThrow();
+            assertThat(warning.stepId()).isNull();
+            assertThat(warning.payload().get("paths")).extracting(com.fasterxml.jackson.databind.JsonNode::asText)
+                    .containsExactly("README.md");
+        }
+    }
+
     private static StepStatus statusOf(dev.forgeide.core.run.RunSnapshot snapshot, String stepId) {
         return snapshot.steps().stream().filter(s -> s.stepId().equals(stepId)).findFirst()
                 .orElseThrow().status();

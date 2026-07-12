@@ -132,6 +132,16 @@ final class AuditPayloads {
         return payload;
     }
 
+    /** T36/SR-6: paths already dirty in {@code git status} at run start — scope-diff exempts
+     * exactly these from every phase's {@code allowed_write} check for the run's whole duration
+     * (see {@code GitScopeDiff}'s class doc), so the audit trail names them up front. */
+    static ObjectNode dirtyTreePayload(List<String> paths) {
+        ObjectNode payload = MAPPER.createObjectNode();
+        ArrayNode array = payload.putArray("paths");
+        paths.forEach(array::add);
+        return payload;
+    }
+
     static ObjectNode promptDriftPayload(String path, String snapshot, String current) {
         ObjectNode payload = MAPPER.createObjectNode();
         payload.put("promptPath", path);

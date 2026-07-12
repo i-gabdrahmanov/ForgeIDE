@@ -4,6 +4,7 @@ import dev.forgeide.core.pipeline.PerTaskLoop;
 import dev.forgeide.core.pipeline.PipelineDefinition;
 import dev.forgeide.core.pipeline.StepDefinition;
 import dev.forgeide.core.port.HarnessGuardPort;
+import dev.forgeide.core.port.ScopeDiffPort;
 import dev.forgeide.core.port.StateStore;
 import dev.forgeide.core.project.ProjectDefinition;
 import dev.forgeide.core.run.PipelineRun;
@@ -36,11 +37,13 @@ final class RunLifecycle {
     private static final Logger log = LoggerFactory.getLogger(RunLifecycle.class);
 
     private final HarnessGuardPort harnessGuard;
+    private final ScopeDiffPort scopeDiff;
     private final StateStore stateStore;
     private final PipelineEngine actor;
 
-    RunLifecycle(HarnessGuardPort harnessGuard, StateStore stateStore, PipelineEngine actor) {
+    RunLifecycle(HarnessGuardPort harnessGuard, ScopeDiffPort scopeDiff, StateStore stateStore, PipelineEngine actor) {
         this.harnessGuard = harnessGuard;
+        this.scopeDiff = scopeDiff;
         this.stateStore = stateStore;
         this.actor = actor;
     }
@@ -90,6 +93,7 @@ final class RunLifecycle {
             // after, not before, its persistAndPublish.
             actor.audit(ctx, null, 0, "run.started",
                     AuditPayloads.runStartedPayload(featureSlug, definition, topLevelIds));
+            warnIfTreeDirty(ctx, project);
             actor.advance(ctx);
         } catch (RuntimeException ex) {
             log.error("failed to start run {} for feature {}", runId, featureSlug, ex);
@@ -100,6 +104,23 @@ final class RunLifecycle {
             actor.persistAndPublish(failedCtx);
             actor.audit(failedCtx, null, 0, "run.paused",
                     AuditPayloads.haltPayload(RunHaltReason.ENGINE_ERROR.name(), String.valueOf(ex.getMessage())));
+        }
+    }
+
+    /**
+     * T36/SR-6: scope-diff (see {@code GitScopeDiff}'s class doc) only ever compares status codes
+     * before/after a phase — a path already dirty when the run starts keeps its pre-existing code
+     * for the whole run and is silently exempt from every phase's {@code allowed_write} check.
+     * That trade-off is deliberate (a full content walk would blow NFR-4's per-phase budget), but
+     * it must not be something a human only discovers by reading {@code GitScopeDiff}'s Javadoc —
+     * hence a loud, once-per-run audit entry the moment it's known to apply. Never blocks the run;
+     * "clean tree" is silent, so a normal start looks exactly as it did before this check existed.
+     */
+    private void warnIfTreeDirty(RunContext ctx, ProjectDefinition project) {
+        ScopeDiffPort.Snapshot snapshot = scopeDiff.snapshot(project.repositoryPath());
+        if (!snapshot.statusByPath().isEmpty()) {
+            actor.audit(ctx, null, 0, "run.dirty_tree",
+                    AuditPayloads.dirtyTreePayload(List.copyOf(snapshot.statusByPath().keySet())));
         }
     }
 

@@ -184,7 +184,7 @@ public final class PipelineEngine implements AutoCloseable {
         this.gateAndQuestionCoordinator = new GateAndQuestionCoordinator(this.judgeCoordinator, this);
         this.dryRunAndPreview = new DryRunAndPreviewCoordinator(this.harnessGuard, this.workers, this.stateStore,
                 this.judgeCoordinator, this.phaseDispatcher, this);
-        this.runLifecycle = new RunLifecycle(this.harnessGuard, this.stateStore, this);
+        this.runLifecycle = new RunLifecycle(this.harnessGuard, this.scopeDiff, this.stateStore, this);
         this.actorThread = new Thread(this::runLoop, "forgeide-pipeline-engine");
         this.actorThread.setDaemon(true);
         this.actorThread.start();

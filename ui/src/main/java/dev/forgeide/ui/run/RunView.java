@@ -34,6 +34,7 @@ import javafx.scene.control.Tab;
 import javafx.scene.control.TabPane;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
+import javafx.scene.layout.VBox;
 import javafx.stage.FileChooser;
 import javafx.stage.Stage;
 import javafx.stage.Window;
@@ -47,6 +48,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Run view (SD §7, T10): the same canvas as T05 with a live status overlay, plus a bottom panel
@@ -81,6 +83,16 @@ public final class RunView extends BorderPane {
      * dismiss-and-reopen-from-canvas story as a gate, for a step left {@code WAITING_INPUT}). */
     private final Map<String, EngineEvent.QuestionsPending> pendingQuestions = new LinkedHashMap<>();
     private final Map<String, Stage> openQuestionDialogs = new LinkedHashMap<>();
+
+    /** T36/SR-6: a persistent, non-blocking banner for "this run started on a dirty git tree, so
+     * scope-diff is weakened for its whole duration" — see {@code RunLifecycle#warnIfTreeDirty}.
+     * {@code dirtyTreeChecked} guards against re-loading the audit chain on every snapshot tick
+     * once the answer (found or genuinely clean) is known. */
+    private final Label dirtyTreeBanner = new Label(
+            "⚠ Run started on a dirty git tree — scope-diff is weakened for files already dirty "
+                    + "at start (see docs/manual.md §11). Recommendation: run on a clean tree.");
+    private final AtomicBoolean dirtyTreeCheckInFlight = new AtomicBoolean(false);
+    private volatile boolean dirtyTreeChecked = false;
 
     public RunView(PipelineEngine engine, StateStore stateStore, ProjectDefinition project,
                    PipelineDefinition pipeline, RunId runId, String featureSlug, Runnable onBack) {
@@ -154,7 +166,11 @@ public final class RunView extends BorderPane {
                 export, status);
         header.setAlignment(Pos.CENTER_LEFT);
         header.setPadding(new Insets(12));
-        setTop(header);
+        dirtyTreeBanner.setStyle("-fx-text-fill: #a15c00; -fx-font-weight: bold;");
+        dirtyTreeBanner.setPadding(new Insets(0, 12, 8, 12));
+        dirtyTreeBanner.setVisible(false);
+        dirtyTreeBanner.setManaged(false);
+        setTop(new VBox(header, dirtyTreeBanner));
 
         canvas.selectedStepProperty().addListener((obs, old, step) -> {
             selectedStep = step;
@@ -189,8 +205,12 @@ public final class RunView extends BorderPane {
             retargetLog();
             prunePendingGates(snapshot);
             prunePendingQuestions(snapshot);
+            maybeCheckDirtyTreeWarning(snapshot);
         });
-        Optional.ofNullable(viewModel.snapshotProperty().get()).ifPresent(canvas::applyRunSnapshot);
+        Optional.ofNullable(viewModel.snapshotProperty().get()).ifPresent(snapshot -> {
+            canvas.applyRunSnapshot(snapshot);
+            maybeCheckDirtyTreeWarning(snapshot);
+        });
 
         viewModel.onGateRequest(this::onGateRequest);
         viewModel.onQuestionsPending(this::onQuestionsPending);
@@ -292,6 +312,32 @@ public final class RunView extends BorderPane {
                 .findFirst()
                 .map(s -> s.status() != StepStatus.WAITING_INPUT)
                 .orElse(true));
+    }
+
+    /**
+     * T36: {@code run.dirty_tree} is written (if at all) strictly before {@link RunSnapshot}'s
+     * every step leaves {@code PENDING} — both happen on the actor thread, in that order, inside
+     * the same {@code RunLifecycle#bootstrap} call — so waiting for the first non-{@code PENDING}
+     * step before loading the audit chain is race-free without polling on every snapshot tick:
+     * once resolved once (found or genuinely clean), this never runs again for this view.
+     */
+    private void maybeCheckDirtyTreeWarning(RunSnapshot snapshot) {
+        if (dirtyTreeChecked || snapshot.steps().stream().allMatch(s -> s.status() == StepStatus.PENDING)) {
+            return;
+        }
+        if (!dirtyTreeCheckInFlight.compareAndSet(false, true)) {
+            return;
+        }
+        Thread.ofVirtual().start(() -> {
+            boolean dirty = stateStore.loadAudit(runId).stream().anyMatch(e -> e.type().equals("run.dirty_tree"));
+            Platform.runLater(() -> {
+                dirtyTreeChecked = true;
+                if (dirty) {
+                    dirtyTreeBanner.setVisible(true);
+                    dirtyTreeBanner.setManaged(true);
+                }
+            });
+        });
     }
 
     /** {@code Retry step} is only ever enabled for the selected tile's own current status — the
