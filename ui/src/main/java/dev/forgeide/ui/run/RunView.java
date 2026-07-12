@@ -11,6 +11,7 @@ import dev.forgeide.core.port.TileValidityChecker;
 import dev.forgeide.core.project.ProjectDefinition;
 import dev.forgeide.core.run.FailureReason;
 import dev.forgeide.core.run.QuestionEscalationAction;
+import dev.forgeide.core.run.RunHaltReason;
 import dev.forgeide.core.run.RunId;
 import dev.forgeide.core.run.RunSnapshot;
 import dev.forgeide.core.run.RunStatus;
@@ -148,10 +149,11 @@ public final class RunView extends BorderPane {
         Button rollback = new Button("Roll back extra changes");
         Button export = new Button("Export…");
         Label status = new Label();
-        back.setOnAction(e -> {
+        Runnable goBack = () -> {
             dispose();
             onBack.run();
-        });
+        };
+        back.setOnAction(e -> goBack.run());
         cancel.setOnAction(e -> viewModel.cancel());
         retry.setOnAction(e -> {
             if (selectedStep != null) {
@@ -170,7 +172,26 @@ public final class RunView extends BorderPane {
         dirtyTreeBanner.setPadding(new Insets(0, 12, 8, 12));
         dirtyTreeBanner.setVisible(false);
         dirtyTreeBanner.setManaged(false);
-        setTop(new VBox(header, dirtyTreeBanner));
+
+        // T37/FR-1.4: a run that never even started because the harness wasn't deployed (or its
+        // last preflight didn't pass) needs to point the human at the fix, not just print the
+        // bare enum name next to "PAUSED" — see the acceptance in T37's task doc: "прогон на
+        // HARNESS_PREFLIGHT ведёт пользователя к деплою". Synchronous (no audit-chain load): the
+        // halt reason is already on every published snapshot, and this — unlike a mid-run pause —
+        // can never toggle back off within the same run.
+        Label harnessPreflightMessage = new Label(
+                "⚠ Run paused — the harness hasn't been deployed, or its last preflight didn't pass. "
+                        + "Deploy the harness on the project card, then start a new run.");
+        harnessPreflightMessage.setStyle("-fx-text-fill: #a15c00; -fx-font-weight: bold;");
+        Button goToProjectCard = new Button("Go to project card");
+        goToProjectCard.setOnAction(e -> goBack.run());
+        HBox harnessPreflightBanner = new HBox(12, harnessPreflightMessage, goToProjectCard);
+        harnessPreflightBanner.setAlignment(Pos.CENTER_LEFT);
+        harnessPreflightBanner.setPadding(new Insets(0, 12, 8, 12));
+        harnessPreflightBanner.setVisible(false);
+        harnessPreflightBanner.setManaged(false);
+
+        setTop(new VBox(header, dirtyTreeBanner, harnessPreflightBanner));
 
         canvas.selectedStepProperty().addListener((obs, old, step) -> {
             selectedStep = step;
@@ -206,10 +227,12 @@ public final class RunView extends BorderPane {
             prunePendingGates(snapshot);
             prunePendingQuestions(snapshot);
             maybeCheckDirtyTreeWarning(snapshot);
+            applyHarnessPreflightBanner(harnessPreflightBanner, snapshot);
         });
         Optional.ofNullable(viewModel.snapshotProperty().get()).ifPresent(snapshot -> {
             canvas.applyRunSnapshot(snapshot);
             maybeCheckDirtyTreeWarning(snapshot);
+            applyHarnessPreflightBanner(harnessPreflightBanner, snapshot);
         });
 
         viewModel.onGateRequest(this::onGateRequest);
@@ -312,6 +335,14 @@ public final class RunView extends BorderPane {
                 .findFirst()
                 .map(s -> s.status() != StepStatus.WAITING_INPUT)
                 .orElse(true));
+    }
+
+    /** T37: toggles the "deploy the harness" banner for exactly {@code PAUSED(HARNESS_PREFLIGHT)}. */
+    private static void applyHarnessPreflightBanner(HBox banner, RunSnapshot snapshot) {
+        boolean blocked = snapshot.status() == RunStatus.PAUSED
+                && snapshot.haltReason().filter(r -> r == RunHaltReason.HARNESS_PREFLIGHT).isPresent();
+        banner.setVisible(blocked);
+        banner.setManaged(blocked);
     }
 
     /**

@@ -2,6 +2,7 @@ package dev.forgeide.ui.project;
 
 import dev.forgeide.core.pipeline.PipelineDefinition;
 import dev.forgeide.core.pipeline.yaml.PipelineYaml;
+import dev.forgeide.core.port.HarnessGuardPort;
 import dev.forgeide.core.port.RuntimeAvailabilityChecker;
 import dev.forgeide.core.project.ProjectDefinition;
 import dev.forgeide.core.project.ProjectParamValidator;
@@ -20,6 +21,7 @@ import javafx.scene.paint.Color;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
@@ -31,6 +33,7 @@ import java.util.Optional;
 public final class ProjectDetailView extends BorderPane {
 
     public ProjectDetailView(ProjectDefinition project, RuntimeAvailabilityChecker checker,
+                              HarnessGuardPort harnessGuard, boolean autoDeployHarness,
                               Runnable onEdit, Runnable onBack, Runnable onOpenCanvas, Runnable onStartRun,
                               Runnable onRunHistory, Runnable onImport) {
         Button back = new Button("← Projects");
@@ -61,6 +64,7 @@ public final class ProjectDetailView extends BorderPane {
 
         content.getChildren().add(labelledList("Specs", project.specPaths().stream().map(Path::toString).toList()));
         content.getChildren().add(runtimesSection(project, checker));
+        content.getChildren().add(harnessSection(project, harnessGuard, autoDeployHarness));
         content.getChildren().add(labelledList("Params",
                 project.paramValues().entrySet().stream().map(en -> en.getKey() + " = " + en.getValue()).toList()));
 
@@ -90,6 +94,62 @@ public final class ProjectDetailView extends BorderPane {
             });
         }
         return box;
+    }
+
+    /**
+     * T37: "Deploy harness" button + status line + (on a failed preflight) a bullet list of
+     * {@code preflight.py}'s problems — the only UI entry point onto {@link
+     * HarnessGuardPort#deploy}, which until now nothing in {@code ui} ever called (a fresh
+     * project's first run had no way past {@code HARNESS_PREFLIGHT} except the T20 trusted-edit
+     * workaround {@code docs/manual.md} §5 used to describe). {@code autoDeployHarness} fires the
+     * same click handler once, right after the section is built, for the "just imported — deploy
+     * now?" flow ({@link ProjectsController#showImport}) — same code path as a manual click, so
+     * there is exactly one place that talks to {@link HarnessGuardPort#deploy}.
+     */
+    private VBox harnessSection(ProjectDefinition project, HarnessGuardPort harnessGuard, boolean autoDeployHarness) {
+        VBox box = new VBox(6, sectionLabel("Harness"));
+        Label status = new Label("checking…");
+        Button deploy = new Button("Deploy harness");
+        VBox problems = new VBox(2);
+        box.getChildren().addAll(new HBox(8, deploy, status), problems);
+
+        deploy.setOnAction(e -> {
+            deploy.setDisable(true);
+            status.setText("deploying…");
+            status.setTextFill(Color.BLACK);
+            problems.getChildren().clear();
+            Thread.ofVirtual().start(() -> {
+                HarnessGuardPort.DeployResult result = harnessGuard.deploy(project.repositoryPath());
+                Platform.runLater(() -> {
+                    deploy.setDisable(false);
+                    applyHarnessStatus(status, problems, result.preflightPassed(), result.preflightOutput(),
+                            Optional.of(Instant.now()));
+                });
+            });
+        });
+
+        Thread.ofVirtual().start(() -> {
+            HarnessGuardPort.PreflightStatus current = harnessGuard.preflightStatus(project.repositoryPath());
+            Platform.runLater(() -> applyHarnessStatus(status, problems, current.passed(), current.detail(),
+                    current.deployedAt()));
+        });
+        if (autoDeployHarness) {
+            deploy.fire();
+        }
+        return box;
+    }
+
+    private void applyHarnessStatus(Label status, VBox problems, boolean passed, String detail,
+                                     Optional<Instant> deployedAt) {
+        status.setText(HarnessStatusText.summary(passed, deployedAt));
+        status.setTextFill(passed ? Color.SEAGREEN : Color.FIREBRICK);
+        problems.getChildren().setAll(HarnessStatusText.problems(passed, detail).stream()
+                .map(line -> {
+                    Label p = new Label("• " + line);
+                    p.setTextFill(Color.FIREBRICK);
+                    return p;
+                })
+                .toList());
     }
 
     private VBox labelledList(String label, List<String> lines) {
