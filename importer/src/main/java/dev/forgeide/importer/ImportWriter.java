@@ -19,6 +19,10 @@ public final class ImportWriter {
 
     private static final String FORGEIDE_DIR = ".forgeide";
     private static final String PIPELINE_FILE = "pipeline.yaml";
+    private static final String GITIGNORE_FILE = ".gitignore";
+    /** SD §6.2's "raw-логи не трогаем, но ground/ai-logs/ добавляется в .gitignore" half of the
+     * masking promise — untrusted agent stdout/stderr must never end up committed. */
+    private static final String AI_LOGS_ENTRY = "ground/ai-logs/";
 
     private ImportWriter() {
     }
@@ -42,6 +46,35 @@ public final class ImportWriter {
         }
 
         new ImportManifest(result.stepToRegistryId()).write(ImportManifest.pathUnder(forgeideDir));
+        ensureAiLogsIgnored(projectRoot);
+    }
+
+    /** Idempotent: a re-import over an already-patched {@code .gitignore} (any of the common
+     * spellings — with/without a leading/trailing slash) leaves it untouched rather than piling
+     * up duplicate lines. */
+    private static void ensureAiLogsIgnored(Path projectRoot) {
+        Path gitignore = projectRoot.resolve(GITIGNORE_FILE);
+        try {
+            String existing = Files.isRegularFile(gitignore)
+                    ? Files.readString(gitignore, StandardCharsets.UTF_8)
+                    : "";
+            boolean alreadyIgnored = existing.lines().map(String::strip)
+                    .anyMatch(line -> switch (line) {
+                        case "ground/ai-logs/", "ground/ai-logs", "/ground/ai-logs/", "/ground/ai-logs" -> true;
+                        default -> false;
+                    });
+            if (alreadyIgnored) {
+                return;
+            }
+            StringBuilder patched = new StringBuilder(existing);
+            if (!existing.isEmpty() && !existing.endsWith("\n")) {
+                patched.append('\n');
+            }
+            patched.append(AI_LOGS_ENTRY).append('\n');
+            Files.writeString(gitignore, patched.toString(), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new UncheckedIOException("cannot update " + gitignore, e);
+        }
     }
 
     private static void writeString(Path file, String content) {
