@@ -66,6 +66,26 @@ class DefaultHarnessGuardTest {
     }
 
     @Test
+    void deployingAHarnessWithSettingsAtTheOldHooksLocationFailsPreflightWithAMigrationMessage(
+            @TempDir Path project, @TempDir Path forgeideHome) throws IOException {
+        assumePython3Available();
+        Path harness = project.resolve(".gigacode");
+        Files.createDirectories(harness.resolve("hooks"));
+        Files.writeString(harness.resolve("hooks/settings.hooks.json"), """
+                {"hooks": {"SubagentStop": []}}
+                """);
+        DefaultHarnessGuard guard = new DefaultHarnessGuard(forgeideHome);
+
+        HarnessGuardPort.DeployResult result = guard.deploy(project);
+
+        assertThat(result.preflightPassed()).isFalse();
+        assertThat(result.preflightOutput())
+                .contains("hooks/settings.hooks.json")
+                .contains("move it to")
+                .contains("settings.hooks.json");
+    }
+
+    @Test
     void noDriftRightAfterDeploy(@TempDir Path project, @TempDir Path forgeideHome) throws IOException {
         assumePython3Available();
         writeValidHarness(project);

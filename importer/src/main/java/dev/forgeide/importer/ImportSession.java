@@ -88,8 +88,10 @@ public final class ImportSession {
                     .ifPresent(skillId -> stepToRegistryId.put(baseStepId(matched.key()), skillId));
         }
 
+        // T32: settings.hooks.json lands at the harness root, not under hooks/ — that's where
+        // preflight.py and HarnessLayout.SETTINGS_FILE / the hash-manifest expect to find it.
         catalog.hooksFile().ifPresent(hooks ->
-                files.put(Path.of(".gigacode/hooks/settings.hooks.json"), readString(hooks)));
+                files.put(Path.of(".gigacode/settings.hooks.json"), readString(hooks)));
         catalog.skillDirs().forEach((id, dir) -> {
             Path skillMd = dir.resolve("SKILL.md");
             if (Files.isRegularFile(skillMd)) {
