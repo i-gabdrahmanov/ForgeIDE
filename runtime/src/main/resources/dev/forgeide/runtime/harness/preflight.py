@@ -51,13 +51,18 @@ def _check(project: Path) -> list[str]:
         return problems
 
     for value in _walk_strings(config):
-        if value.endswith(".py") or value.endswith(".sh"):
-            candidate = Path(value)
-            # Hook paths in settings.hooks.json are relative to the harness directory itself
-            # (.gigacode/), the same root the hash-manifest (SR-8) hashes hooks/skills under.
-            hook_path = candidate if candidate.is_absolute() else harness / value
-            if not hook_path.is_file():
-                problems.append(f"hook referenced in settings.hooks.json not found: {value}")
+        # T38: a hook reference is routinely a whole command line ("python3 hooks/tdd-guard.py"),
+        # not a bare path, so split on whitespace and check each token that looks like a script —
+        # checking the unsplit string used to reject valid configs (".gigacode/python3 hooks/..."
+        # is not a file) and made every freshly imported project fail preflight.
+        for token in value.split():
+            if token.endswith(".py") or token.endswith(".sh"):
+                candidate = Path(token)
+                # Hook paths in settings.hooks.json are relative to the harness directory itself
+                # (.gigacode/), the same root the hash-manifest (SR-8) hashes hooks/skills under.
+                hook_path = candidate if candidate.is_absolute() else harness / token
+                if not hook_path.is_file():
+                    problems.append(f"hook referenced in settings.hooks.json not found: {token}")
 
     return problems
 

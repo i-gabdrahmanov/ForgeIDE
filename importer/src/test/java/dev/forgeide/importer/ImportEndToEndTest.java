@@ -57,6 +57,9 @@ class ImportEndToEndTest {
         // hash-manifest look for it — not under hooks/ (the old, broken location).
         assertThat(projectRoot.resolve(".gigacode/settings.hooks.json")).isRegularFile();
         assertThat(projectRoot.resolve(".gigacode/hooks/settings.hooks.json")).doesNotExist();
+        // T38: the hook scripts that config references travel with it — without them the
+        // deployed harness fails preflight (see ImportDeployPreflightChainTest).
+        assertThat(projectRoot.resolve(".gigacode/hooks/tdd-guard.py")).isRegularFile();
         assertThat(projectRoot.resolve(".gigacode/SKILLS-REGISTRY.md")).isRegularFile();
         assertThat(projectRoot.resolve(".forgeide/import-manifest.json")).isRegularFile();
 
