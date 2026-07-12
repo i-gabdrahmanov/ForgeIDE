@@ -120,13 +120,17 @@ class GitScopeDiffTest {
         assertThat(snapshot.head()).isNull();
     }
 
+    /** NFR-4 (SDD §6, task T31): the SDD names 100k files explicitly ("на репозитории до 100k
+     * файлов") — the prior 5k here was an unrecorded scale-down (audit 2026-07 finding). File
+     * creation itself is excluded from the timed window; only the git-plumbing calls the
+     * overhead budget actually applies to are measured. */
     @Test
     void manyUntrackedFilesStayWellWithinTheNfr4Budget(@TempDir Path repo) throws IOException, InterruptedException {
         assumeGitAvailable();
         init(repo);
         run(repo, "commit", "--allow-empty", "-q", "-m", "initial");
         Files.createDirectories(repo.resolve("src"));
-        for (int i = 0; i < 5_000; i++) {
+        for (int i = 0; i < 100_000; i++) {
             Files.writeString(repo.resolve("src/file-" + i + ".txt"), "x");
         }
 

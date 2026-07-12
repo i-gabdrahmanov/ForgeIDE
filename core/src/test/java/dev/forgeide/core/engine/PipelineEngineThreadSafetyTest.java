@@ -5,6 +5,7 @@ import dev.forgeide.core.engine.support.FixtureScriptRunnerPort;
 import dev.forgeide.core.engine.support.InMemoryStateStore;
 import dev.forgeide.core.engine.support.TestProjects;
 import dev.forgeide.core.event.EngineCommand;
+import dev.forgeide.core.event.EngineEvent;
 import dev.forgeide.core.pipeline.PipelineDefinition;
 import dev.forgeide.core.pipeline.ScriptStep;
 import dev.forgeide.core.port.ScriptResult;
@@ -19,6 +20,8 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static dev.forgeide.core.engine.support.Await.until;
 import static dev.forgeide.core.engine.support.Snapshots.statusOf;
@@ -79,6 +82,53 @@ class PipelineEngineThreadSafetyTest {
             assertThat(threadNames).hasSize(1);
             assertThat(threadNames.iterator().next()).isNotIn(
                     submitters.stream().map(Thread::getName).toList());
+        }
+    }
+
+    /**
+     * NFR-2 (SDD §6, task T31): "событие движка → снапшот доступен подписчику" ≤ 200 мс, measured
+     * at this engine/viewmodel level (no JavaFX render in the picture) — from the moment the
+     * fixture script signals completion to the moment a subscriber observes the resulting {@code
+     * PASSED} snapshot via {@link PipelineEngine#subscribe}. {@link PipelineEngine#snapshot} is
+     * updated synchronously just before {@code publish} (see {@code PipelineEngine#persistAndPublish}),
+     * so a subscriber seeing the event is also proof the snapshot is already available.
+     */
+    @Test
+    void engineEventReachesASubscriberWithAnUpdatedSnapshotWithin200Ms(@TempDir Path repo) throws InterruptedException {
+        ScriptStep step = new ScriptStep("a", List.of(), List.of("build"), Duration.ofSeconds(5));
+        PipelineDefinition definition = new PipelineDefinition("p", 1, List.of(step));
+
+        AtomicLong scriptReturnedAtNanos = new AtomicLong();
+        FixtureScriptRunnerPort scriptRunner = new FixtureScriptRunnerPort(inv -> {
+            ScriptResult result = new ScriptResult(0, "ok", "");
+            scriptReturnedAtNanos.set(System.nanoTime());
+            return result;
+        });
+        FixtureAgentRuntimePort agentRuntime = new FixtureAgentRuntimePort(inv -> {
+            throw new AssertionError("this pipeline has no agent step");
+        });
+
+        AtomicLong subscriberSawAtNanos = new AtomicLong();
+        CountDownLatch stepPassedSeen = new CountDownLatch(1);
+
+        try (PipelineEngine engine = new PipelineEngine(new InMemoryStateStore(), agentRuntime, scriptRunner)) {
+            engine.subscribe(event -> {
+                if (event instanceof EngineEvent.RunUpdated updated
+                        && statusOf(updated.snapshot(), "a") == StepStatus.PASSED) {
+                    subscriberSawAtNanos.compareAndSet(0, System.nanoTime());
+                    stepPassedSeen.countDown();
+                }
+            });
+
+            RunId runId = engine.start(TestProjects.minimal(repo), definition, "feature-x");
+
+            assertThat(stepPassedSeen.await(2, TimeUnit.SECONDS)).isTrue();
+
+            long elapsedMs = (subscriberSawAtNanos.get() - scriptReturnedAtNanos.get()) / 1_000_000;
+            assertThat(elapsedMs).isLessThan(200);
+
+            // "снапшот доступен подписчику": a snapshot() read right after also reflects it.
+            assertThat(statusOf(engine.snapshot(runId).orElseThrow(), "a")).isEqualTo(StepStatus.PASSED);
         }
     }
 }
