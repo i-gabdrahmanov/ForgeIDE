@@ -1,5 +1,7 @@
 package dev.forgeide.runtime.state;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.forgeide.core.audit.AuditEvent;
 import dev.forgeide.core.run.FailureReason;
 import dev.forgeide.core.run.RunId;
@@ -11,6 +13,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
@@ -74,6 +78,46 @@ class StartupRecoveryTest {
         List<RunId> recovered = StartupRecovery.recover(store);
 
         assertThat(recovered).containsExactlyInAnyOrder(abandoned1, abandoned2);
+    }
+
+    /**
+     * NFR-3 (SDD §6, task T31): "восстановление после kill IDE ≤ 5 с" — measured on a run with
+     * dozens of steps and a 10k+-event audit chain, since {@link FileStateStore#load} (called by
+     * {@link StartupRecovery#recover}) re-reads and re-verifies the whole hash chain, not just
+     * the {@code run.json} snapshot.
+     */
+    @Test
+    void recoversAnAbandonedRunFromSotWithin5SecondsAtScale(@TempDir Path stateRoot) {
+        FileStateStore store = new FileStateStore(stateRoot);
+        RunId runId = RunId.newId();
+
+        int stepCount = 40;
+        List<StepSnapshot> steps = new ArrayList<>();
+        for (int i = 0; i < stepCount; i++) {
+            StepStatus status = i == stepCount - 1 ? StepStatus.RUNNING : StepStatus.PASSED;
+            steps.add(new StepSnapshot("step-" + i, status, 1, Optional.empty(), List.of(), List.of(), List.of()));
+        }
+        store.save(new RunSnapshot(runId, "feature-x", RunStatus.RUNNING, Optional.empty(), steps));
+
+        ObjectMapper mapper = new ObjectMapper();
+        int auditEventCount = 10_000;
+        for (int i = 0; i < auditEventCount; i++) {
+            ObjectNode payload = mapper.createObjectNode();
+            payload.put("n", i);
+            String stepId = steps.get(i % stepCount).stepId();
+            store.appendAudit(new AuditEvent(0, Instant.now(), runId, stepId, 1, "step.progress", payload, "", ""));
+        }
+
+        long start = System.nanoTime();
+        List<RunId> recovered = StartupRecovery.recover(store);
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000;
+
+        assertThat(recovered).containsExactly(runId);
+        assertThat(elapsedMs).isLessThan(5_000);
+
+        StepSnapshot recoveredLast = store.load(runId).orElseThrow().steps().get(stepCount - 1);
+        assertThat(recoveredLast.status()).isEqualTo(StepStatus.FAILED);
+        assertThat(recoveredLast.failureReason()).contains(FailureReason.INTERRUPTED);
     }
 
     private static Path newTempStateRoot() {

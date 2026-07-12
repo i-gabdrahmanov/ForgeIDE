@@ -1,16 +1,22 @@
 package dev.forgeide.core.pipeline.edit;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.forgeide.core.engine.PipelineEngine;
 import dev.forgeide.core.engine.support.FixtureAgentRuntimePort;
 import dev.forgeide.core.engine.support.FixtureScriptRunnerPort;
 import dev.forgeide.core.engine.support.InMemoryStateStore;
 import dev.forgeide.core.engine.support.TestProjects;
+import dev.forgeide.core.event.EngineCommand;
 import dev.forgeide.core.pipeline.AgentStep;
+import dev.forgeide.core.pipeline.GateStep;
 import dev.forgeide.core.pipeline.JudgeStep;
 import dev.forgeide.core.pipeline.PipelineDefinition;
 import dev.forgeide.core.pipeline.ScriptStep;
 import dev.forgeide.core.pipeline.validation.PipelineValidator;
 import dev.forgeide.core.pipeline.yaml.PipelineYaml;
+import dev.forgeide.core.port.AgentResult;
+import dev.forgeide.core.port.TokenUsage;
 import dev.forgeide.core.run.RunId;
 import dev.forgeide.core.run.RunStatus;
 import dev.forgeide.core.run.StepStatus;
@@ -20,7 +26,9 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
 import static dev.forgeide.core.engine.support.Await.until;
@@ -32,7 +40,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * после заполнения — зелёно") purely through the building blocks a canvas drag&drop/edge-drag
  * would invoke — {@link StepDefaults}, {@link PipelineEdits}, {@link PipelineDocument} — plus a
  * second pipeline proving a constructor-assembled definition runs end-to-end on the fixture
- * runtime once it is valid.
+ * runtime once it is valid, and a third (T31/SDD §7.6) doing the same for an agent+judge+gate
+ * pipeline — the palette-assembled combination §7.6's acceptance item 6 names explicitly, not
+ * just the script-only path the second test covers.
  */
 class PipelineConstructorEndToEndTest {
 
@@ -99,6 +109,72 @@ class PipelineConstructorEndToEndTest {
             var snapshot = engine.snapshot(runId).orElseThrow();
             assertThat(statusOf(snapshot, a)).isEqualTo(StepStatus.PASSED);
             assertThat(statusOf(snapshot, b)).isEqualTo(StepStatus.PASSED);
+        }
+    }
+
+    @Test
+    void anAgentJudgeGatePipelineAssembledFromThePaletteRunsEndToEndOnTheFixtureRuntime(@TempDir Path repo) throws IOException {
+        PipelineDocument document = new PipelineDocument(new PipelineDefinition("p", 1, List.of()),
+                PipelineValidator.Options.withRoot(repo));
+
+        String agentId = StepIds.next(StepKind.AGENT, Set.of());
+        document.apply(PipelineEdits.addStep(StepDefaults.create(StepKind.AGENT, agentId)));
+        String judgeId = StepIds.next(StepKind.JUDGE, Set.of(agentId));
+        document.apply(PipelineEdits.addStep(StepDefaults.create(StepKind.JUDGE, judgeId)));
+        String gateId = StepIds.next(StepKind.GATE, Set.of(agentId, judgeId));
+        document.apply(PipelineEdits.addStep(StepDefaults.create(StepKind.GATE, gateId)));
+
+        // FR-2.5 "протяжка ребра между плитками = depends_on", chained agent -> judge -> gate.
+        document.apply(PipelineEdits.addDependency(agentId, judgeId));
+        document.apply(PipelineEdits.addDependency(judgeId, gateId));
+
+        JudgeStep judge = (JudgeStep) document.current().step(judgeId);
+        document.apply(PipelineEdits.replaceStep(judgeId,
+                new JudgeStep(judge.id(), judge.dependsOn(), agentId, judge.llmJudge(),
+                        judge.deterministicCheck(), judge.failPolicy())));
+
+        // The default gate question is blank (FR-2.5's "deliberately incomplete" default); fill
+        // it in like the inspector form would — the YAML round trip below requires a real
+        // question even though the live validator does not (PipelineParser#parseGate is stricter
+        // than PipelineValidator here).
+        GateStep gate = (GateStep) document.current().step(gateId);
+        document.apply(PipelineEdits.replaceStep(gateId,
+                new GateStep(gate.id(), gate.dependsOn(), "Ship it?", gate.options(), gate.showArtifacts(), gate.risk())));
+
+        // T23/FR-2.8: seed the fresh agent tile's prompt exactly like ConstructorCanvasView's
+        // new-agent hook does, so the live validator (FR-2.6) turns green.
+        AgentStep agent = (AgentStep) document.current().step(agentId);
+        Path promptPath = agent.promptTemplate();
+        Files.createDirectories(repo.resolve(promptPath).getParent());
+        Files.writeString(repo.resolve(promptPath), AgentPromptScaffold.render(agentId));
+        document.revalidate();
+
+        assertThat(document.isValid()).isTrue();
+
+        String yaml = new PipelineYaml().serialize(document.current());
+        PipelineDefinition reloaded = new PipelineYaml().parse(yaml); // FR-2.7 round trip
+
+        InMemoryStateStore stateStore = new InMemoryStateStore();
+        ObjectMapper mapper = new ObjectMapper();
+        FixtureScriptRunnerPort scriptRunner = FixtureScriptRunnerPort.alwaysOk(); // passes the judge's check
+        FixtureAgentRuntimePort agentRuntime = new FixtureAgentRuntimePort(inv -> {
+            ObjectNode json = mapper.createObjectNode();
+            json.put("step_id", agentId);
+            return new AgentResult(0, Optional.of(json), new TokenUsage(1, 1), Path.of("raw.log"));
+        });
+
+        try (PipelineEngine engine = new PipelineEngine(stateStore, agentRuntime, scriptRunner)) {
+            RunId runId = engine.start(TestProjects.minimal(repo), reloaded, "feature-x");
+
+            until(() -> engine.snapshot(runId).map(s -> statusOf(s, gateId) == StepStatus.WAITING_GATE).orElse(false));
+            engine.submit(new EngineCommand.GateAnswered(runId, gateId, "yes", "tester", Instant.now()));
+
+            until(() -> engine.snapshot(runId).map(s -> s.status() == RunStatus.COMPLETED).orElse(false));
+
+            var snapshot = engine.snapshot(runId).orElseThrow();
+            assertThat(statusOf(snapshot, agentId)).isEqualTo(StepStatus.PASSED);
+            assertThat(statusOf(snapshot, judgeId)).isEqualTo(StepStatus.PASSED);
+            assertThat(statusOf(snapshot, gateId)).isEqualTo(StepStatus.PASSED);
         }
     }
 
