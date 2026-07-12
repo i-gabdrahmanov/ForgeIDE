@@ -10,6 +10,7 @@ import dev.forgeide.core.port.AgentResult;
 import dev.forgeide.core.port.AgentRuntimeException;
 import dev.forgeide.core.port.AgentRuntimePort;
 import dev.forgeide.core.port.TokenUsage;
+import dev.forgeide.core.secret.SecretMasker;
 import dev.forgeide.runtime.process.ParsedLine;
 import dev.forgeide.runtime.process.ProcessKillSignal;
 import dev.forgeide.runtime.process.ProcessLaunchException;
@@ -155,7 +156,11 @@ public abstract class AbstractAgentRuntime implements AgentRuntimePort {
         command.forEach(commandArray::add);
         ArrayNode envKeys = root.putArray("env_keys");
         invocation.env().keySet().forEach(envKeys::add);
-        root.put("prompt", invocation.prompt());
+        // T27/SD §6.2: env values never reach the prompt through variable rendering (only
+        // project/feature/params scopes resolve there), so this is a second line of defense —
+        // e.g. a judge's accumulated_errors block quoting a value the source-side mask in
+        // PipelineEngine somehow missed — not the primary guarantee.
+        root.put("prompt", SecretMasker.mask(invocation.prompt(), invocation.env().values()));
         root.put("prompt_sha256", sha256Hex(invocation.prompt()));
         root.put("started", started.toString());
         root.put("finished", finished.toString());

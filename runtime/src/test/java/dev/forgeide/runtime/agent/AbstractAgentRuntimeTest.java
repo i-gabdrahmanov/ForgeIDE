@@ -7,6 +7,7 @@ import dev.forgeide.core.port.AgentInvocation;
 import dev.forgeide.core.port.AgentResult;
 import dev.forgeide.core.port.AgentRuntimeException;
 import dev.forgeide.core.project.RuntimeBinding;
+import dev.forgeide.core.secret.SecretMasker;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -138,6 +139,22 @@ class AbstractAgentRuntimeTest {
 
         String metaText = Files.readString(invocation.logDir().resolve("meta.json"));
         assertThat(metaText).contains("MCP_TOKEN").doesNotContain("super-secret-value");
+    }
+
+    @Test
+    void metaJsonMasksAnEnvSecretValueThatEndsUpInThePromptText(@TempDir Path dir) throws Exception {
+        // Not how a real dispatch builds a prompt (env values never flow through variable
+        // rendering — see PipelineEngine's VariableResolver) — this is T27's second line of
+        // defense: whatever ends up in the prompt text, a value the phase's own env_scope
+        // handed out must still never reach meta.json in the open.
+        AgentInvocation invocation = invocation(dir, "claude", shell("echo hi"), 10_000,
+                "previous attempt failed: token=super-secret-value was rejected",
+                Map.of("MCP_TOKEN", "super-secret-value"));
+
+        runtime.execute(invocation, event -> { });
+
+        String metaText = Files.readString(invocation.logDir().resolve("meta.json"));
+        assertThat(metaText).doesNotContain("super-secret-value").contains(SecretMasker.MASK);
     }
 
     private static List<String> catCommand(Path fixture) {

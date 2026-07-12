@@ -51,6 +51,7 @@ import dev.forgeide.core.run.RunSnapshot;
 import dev.forgeide.core.run.RunStatus;
 import dev.forgeide.core.run.StepRun;
 import dev.forgeide.core.run.StepStatus;
+import dev.forgeide.core.secret.SecretMasker;
 import dev.forgeide.core.vars.MapVariableResolver;
 import dev.forgeide.core.vars.VariableResolver;
 import org.slf4j.Logger;
@@ -64,6 +65,7 @@ import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Deque;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -1509,7 +1511,15 @@ public final class PipelineEngine implements AutoCloseable {
             // since that is what actually names the problem.
             String output = !result.stderr().isBlank() ? result.stderr() : result.stdout();
             if (!output.isBlank()) {
-                detail.append(": ").append(output.strip());
+                // T27/SD §6.2: this text becomes JudgeVerdict.detail (run.json), the
+                // judge.verdict audit payload, and — on FAIL — accumulated_errors folded into
+                // the target step's next prompt (meta.json); masking it here, before any of
+                // those trusted writes, is the single choke point that covers all three. The
+                // check script runs against the target phase's own artifacts, so a secret it
+                // prints is one the target step's env_scope handed out.
+                Collection<String> targetSecrets =
+                        secretStore.resolve(envScopeOf(ctx.stepDefs.get(judge.targetStepId()))).values();
+                detail.append(": ").append(SecretMasker.mask(output.strip(), targetSecrets));
             }
         }
         if (judge.llmJudge().isPresent()) {
@@ -1534,6 +1544,16 @@ public final class PipelineEngine implements AutoCloseable {
             detail.append("no checks configured");
         }
         return new JudgeCheckOutcome(passed, detail.toString());
+    }
+
+    /** {@code env_scope} of a step definition that has one, empty for the ones that don't
+     * (T27: what {@link #runJudgeChecks} masks a deterministic check's output against). */
+    private static List<String> envScopeOf(StepDefinition def) {
+        return switch (def) {
+            case AgentStep a -> a.envScope();
+            case OutwardStep o -> o.envScope();
+            case null, default -> List.of();
+        };
     }
 
     /**

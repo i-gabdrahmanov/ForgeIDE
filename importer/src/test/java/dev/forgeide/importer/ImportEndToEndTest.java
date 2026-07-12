@@ -16,6 +16,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.YearMonth;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -55,6 +56,40 @@ class ImportEndToEndTest {
         assertThat(projectRoot.resolve(".gigacode/hooks/settings.hooks.json")).isRegularFile();
         assertThat(projectRoot.resolve(".gigacode/SKILLS-REGISTRY.md")).isRegularFile();
         assertThat(projectRoot.resolve(".forgeide/import-manifest.json")).isRegularFile();
+
+        // T27/SD §6.2: raw agent logs are untrusted and never masked, so the harness deploy
+        // itself must keep them out of the target project's git history.
+        assertThat(projectRoot.resolve(".gitignore")).isRegularFile();
+        assertThat(Files.readString(projectRoot.resolve(".gitignore")).lines())
+                .anyMatch(line -> line.strip().equals("ground/ai-logs/"));
+    }
+
+    @Test
+    void deployAppendsTheAiLogsEntryToAnExistingGitignoreWithoutDuplicatingOnReimport(
+            @TempDir Path projectRoot) throws java.io.IOException {
+        Files.writeString(projectRoot.resolve(".gitignore"), "build/\nnode_modules/"); // no trailing newline
+        Path scaffoldRoot = fixture("sample-scaffold");
+        ScaffoldCatalog catalog = ScaffoldScanner.scan(scaffoldRoot);
+        ImportResult result = new ImportSession(PipelineTemplates.forgelite(), catalog).result();
+
+        ImportWriter.write(projectRoot, result);
+        ImportWriter.write(projectRoot, result); // re-import must not duplicate the entry
+
+        List<String> gitignoreLines = Files.readString(projectRoot.resolve(".gitignore")).lines().toList();
+        assertThat(gitignoreLines).contains("build/", "node_modules/", "ground/ai-logs/");
+        assertThat(gitignoreLines.stream().filter(l -> l.strip().equals("ground/ai-logs/")).count()).isEqualTo(1);
+    }
+
+    @Test
+    void deployLeavesAnAlreadyIgnoredEntryAlone(@TempDir Path projectRoot) throws java.io.IOException {
+        Files.writeString(projectRoot.resolve(".gitignore"), "/ground/ai-logs\n");
+        Path scaffoldRoot = fixture("sample-scaffold");
+        ScaffoldCatalog catalog = ScaffoldScanner.scan(scaffoldRoot);
+        ImportResult result = new ImportSession(PipelineTemplates.forgelite(), catalog).result();
+
+        ImportWriter.write(projectRoot, result);
+
+        assertThat(Files.readString(projectRoot.resolve(".gitignore"))).isEqualTo("/ground/ai-logs\n");
     }
 
     @Test
