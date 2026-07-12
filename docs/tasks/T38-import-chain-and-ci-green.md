@@ -41,7 +41,9 @@ importer ↔ модуль runtime).
       (тест временно изъят из прогона): verification прошёл; `ClaudeAgentRuntimeTest`
       покрывает `buildCommand` без бинаря
 - [ ] реальный прогон GitHub Actions зелёный — проверить после push/PR; заодно закрывает
-      два открытых пункта приёмки T26
+      два открытых пункта приёмки T26 — **прогон №26 после мержа T38 остался красным:
+      вскрылась вторая, независимая причина (Linux-баг stdin/process-group в обёртке
+      `ProcessGroupLauncher`), см. [T39](T39-linux-stdin-process-group.md)**
 - [x] импорт `sample-scaffold` → deploy → preflight ok без ручных действий —
       `ImportDeployPreflightChainTest`, первый тест через границу importer→runtime
       (test-only зависимость `importer` → `:runtime`, цикла нет)

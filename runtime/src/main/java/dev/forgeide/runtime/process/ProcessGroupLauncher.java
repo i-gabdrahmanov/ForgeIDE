@@ -13,19 +13,30 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Launches a child in its own POSIX process group without any external {@code setsid} binary
- * (absent by default on macOS) and kills that whole group on demand (SDD SR-9).
+ * Launches a child in its own POSIX process group and kills that whole group on demand
+ * (SDD SR-9).
  *
- * <p>The trick is plain job control, available in every POSIX shell: a command backgrounded
- * under {@code set -m} is forked into a new process group whose id equals the child's own pid
- * — this is exactly what {@code setsid}-less tools (incl. Python's {@code start_new_session})
- * rely on under the hood. The wrapper writes that pid to a temp file (the only way to learn it
- * from outside — {@code ProcessBuilder} only ever hands back the wrapper shell's own pid, not
- * the backgrounded child's) then waits on it, so its own exit code mirrors the child's.
+ * <p>Two mechanisms, picked at run time (T39): {@code setsid} where it exists (every Linux —
+ * util-linux; {@code /bin/sh} there is dash, whose {@code set -m} silently turns itself off
+ * without a controlling tty, leaving the child in the wrapper's own group), else job control
+ * — a command backgrounded under {@code set -m} is forked into a new process group whose id
+ * equals the child's own pid (macOS: no {@code setsid} binary, but {@code /bin/sh} is bash,
+ * where this works tty or not). The wrapper writes that pid to a temp file (the only way to
+ * learn it from outside — {@code ProcessBuilder} only ever hands back the wrapper shell's own
+ * pid, not the backgrounded child's) then waits on it, so its exit code mirrors the child's.
+ *
+ * <p>Stdin: POSIX gives an asynchronous ({@code &}) command {@code /dev/null} as stdin unless
+ * explicitly redirected, and dash enforces exactly that (bash under {@code set -m} does not —
+ * which is why this only ever bit on Linux, silently eating agent prompts and hook payloads).
+ * Hence the fd-3 dance: {@code exec 3<&0} first, then {@code <&3 3<&-} on the child — a plain
+ * self-dup {@code <&0} is NOT enough for dash.
  */
 final class ProcessGroupLauncher {
 
-    private static final String WRAPPER_SCRIPT = "set -m; \"$@\" & printf '%s' \"$!\" > \"$0\"; wait \"$!\"";
+    private static final String WRAPPER_SCRIPT = "exec 3<&0; "
+            + "if command -v setsid >/dev/null 2>&1; then setsid \"$@\" <&3 3<&- & "
+            + "else set -m; \"$@\" <&3 3<&- & fi; "
+            + "printf '%s' \"$!\" > \"$0\"; wait \"$!\"";
     private static final Duration PGID_DISCOVERY_TIMEOUT = Duration.ofSeconds(2);
     private static final Duration PGID_POLL_INTERVAL = Duration.ofMillis(2);
 
