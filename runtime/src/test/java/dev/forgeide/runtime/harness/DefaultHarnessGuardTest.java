@@ -94,6 +94,49 @@ class DefaultHarnessGuardTest {
         assertThat(result.preflightOutput()).contains("not found: hooks/missing-guard.py");
     }
 
+    /** T40: hook commands template the project root as ${PROJECT_ROOT} (e.g. pprb-kid's
+     * "${PYTHON} ${PROJECT_ROOT}/.gigacode/hooks/guard.py") — preflight must expand it to the real
+     * project path before checking, instead of resolving the literal placeholder under .gigacode/
+     * and failing a harness whose scripts are all present. ${PYTHON} is a separate interpreter
+     * token and is left alone. */
+    @Test
+    void preflightExpandsProjectRootPlaceholderInHookCommands(@TempDir Path project, @TempDir Path forgeideHome)
+            throws IOException {
+        assumePython3Available();
+        Path harness = project.resolve(".gigacode");
+        Files.createDirectories(harness.resolve("hooks"));
+        Files.writeString(harness.resolve("hooks/guard.py"), "print('guarding')\n");
+        Files.writeString(harness.resolve("settings.hooks.json"), """
+                {"hooks": {"PreToolUse": [{"matcher": "Write|Edit", "hooks": [
+                  {"type": "command", "command": "${PYTHON} ${PROJECT_ROOT}/.gigacode/hooks/guard.py"}]}]}}
+                """);
+        DefaultHarnessGuard guard = new DefaultHarnessGuard(forgeideHome);
+
+        HarnessGuardPort.DeployResult result = guard.deploy(project);
+
+        assertThat(result.preflightPassed()).as(result.preflightOutput()).isTrue();
+    }
+
+    /** T40 counterpart: a ${PROJECT_ROOT}-templated hook that genuinely doesn't exist still fails
+     * preflight, and the problem names the token as written in the config (not the expanded path). */
+    @Test
+    void preflightStillFailsWhenAProjectRootTemplatedHookIsMissing(
+            @TempDir Path project, @TempDir Path forgeideHome) throws IOException {
+        assumePython3Available();
+        Path harness = project.resolve(".gigacode");
+        Files.createDirectories(harness.resolve("hooks"));
+        Files.writeString(harness.resolve("settings.hooks.json"), """
+                {"hooks": {"PreToolUse": [{"matcher": "Write|Edit", "hooks": [
+                  {"type": "command", "command": "${PYTHON} ${PROJECT_ROOT}/.gigacode/hooks/missing.py"}]}]}}
+                """);
+        DefaultHarnessGuard guard = new DefaultHarnessGuard(forgeideHome);
+
+        HarnessGuardPort.DeployResult result = guard.deploy(project);
+
+        assertThat(result.preflightPassed()).isFalse();
+        assertThat(result.preflightOutput()).contains("not found: ${PROJECT_ROOT}/.gigacode/hooks/missing.py");
+    }
+
     @Test
     void deployingAHarnessWithAMissingReferencedHookFailsPreflight(@TempDir Path project, @TempDir Path forgeideHome)
             throws IOException {
@@ -112,8 +155,12 @@ class DefaultHarnessGuardTest {
         assertThat(guard.preflightStatus(project).passed()).isFalse();
     }
 
+    /** T32 self-heal: deploy relocates a legacy settings.hooks.json (under hooks/) to the harness
+     * root instead of failing preflight — a project imported before the path unification deploys
+     * cleanly, and the stale copy under hooks/ is gone. Mirrors ImportEndToEndTest's root-vs-hooks
+     * assertions for a freshly imported harness. */
     @Test
-    void deployingAHarnessWithSettingsAtTheOldHooksLocationFailsPreflightWithAMigrationMessage(
+    void deployMigratesSettingsFromTheOldHooksLocationToTheHarnessRoot(
             @TempDir Path project, @TempDir Path forgeideHome) throws IOException {
         assumePython3Available();
         Path harness = project.resolve(".gigacode");
@@ -125,11 +172,9 @@ class DefaultHarnessGuardTest {
 
         HarnessGuardPort.DeployResult result = guard.deploy(project);
 
-        assertThat(result.preflightPassed()).isFalse();
-        assertThat(result.preflightOutput())
-                .contains("hooks/settings.hooks.json")
-                .contains("move it to")
-                .contains("settings.hooks.json");
+        assertThat(result.preflightPassed()).as(result.preflightOutput()).isTrue();
+        assertThat(harness.resolve("settings.hooks.json")).isRegularFile();
+        assertThat(harness.resolve("hooks/settings.hooks.json")).doesNotExist();
     }
 
     @Test
