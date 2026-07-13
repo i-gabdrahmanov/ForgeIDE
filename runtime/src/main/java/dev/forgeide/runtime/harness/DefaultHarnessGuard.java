@@ -43,6 +43,7 @@ public final class DefaultHarnessGuard implements HarnessGuardPort {
 
     @Override
     public DeployResult deploy(Path projectRoot) {
+        migrateLegacySettingsFile(projectRoot);
         Map<String, String> manifest = HarnessManifest.scan(projectRoot);
         String hash = HarnessManifest.aggregateHash(manifest);
         copyIntoCache(projectRoot, manifest, HarnessLayout.cacheDir(forgeideHome, hash));
@@ -177,6 +178,29 @@ public final class DefaultHarnessGuard implements HarnessGuardPort {
         HarnessRegistry.write(forgeideHome, projectRoot, new HarnessRegistry.Entry(manifest, newHash, true,
                 "", Instant.now()));
         return new HarnessEditResult(oldHash, newHash, "~ modified: " + relativePath + "\n");
+    }
+
+    // ---- T32 self-heal ----------------------------------------------------------------------
+
+    /** A harness imported before {@code settings.hooks.json} moved to the harness root still keeps
+     * it under {@code hooks/}, where the manifest and {@code preflight.py} don't look for it.
+     * Relocate it to the root before anything hashes the tree — so the cache, baseline and
+     * preflight all see the canonical layout — instead of letting preflight merely warn. No-op
+     * once it already sits at the root (that copy wins), and best-effort: a move that fails leaves
+     * preflight to emit its actionable T32 message, same as before. */
+    private static void migrateLegacySettingsFile(Path projectRoot) {
+        Path root = HarnessLayout.harnessRoot(projectRoot);
+        Path canonical = root.resolve(HarnessLayout.SETTINGS_FILE);
+        Path legacy = root.resolve("hooks").resolve(HarnessLayout.SETTINGS_FILE);
+        if (Files.isRegularFile(canonical) || !Files.isRegularFile(legacy)) {
+            return;
+        }
+        try {
+            Files.move(legacy, canonical);
+        } catch (IOException e) {
+            // best-effort — preflight.py still names the legacy location with a fix hint, same
+            // spirit as rollbackDrift's best-effort deleteIfExists.
+        }
     }
 
     // ---- cache I/O --------------------------------------------------------------------------

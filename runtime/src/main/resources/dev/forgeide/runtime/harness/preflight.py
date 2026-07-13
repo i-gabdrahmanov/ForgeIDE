@@ -55,14 +55,24 @@ def _check(project: Path) -> list[str]:
         # not a bare path, so split on whitespace and check each token that looks like a script —
         # checking the unsplit string used to reject valid configs (".gigacode/python3 hooks/..."
         # is not a file) and made every freshly imported project fail preflight.
-        for token in value.split():
-            if token.endswith(".py") or token.endswith(".sh"):
-                candidate = Path(token)
-                # Hook paths in settings.hooks.json are relative to the harness directory itself
-                # (.gigacode/), the same root the hash-manifest (SR-8) hashes hooks/skills under.
-                hook_path = candidate if candidate.is_absolute() else harness / token
-                if not hook_path.is_file():
-                    problems.append(f"hook referenced in settings.hooks.json not found: {token}")
+        for raw in value.split():
+            # T40: hook commands routinely template the project root as ${PROJECT_ROOT}
+            # ("${PYTHON} ${PROJECT_ROOT}/.gigacode/hooks/guard.py") — expand it to the real project
+            # path first, or the token stays "relative" (starts with "${") and resolves under
+            # .gigacode/ to a path that can never exist, failing a harness whose files are all there.
+            token = raw.replace("${PROJECT_ROOT}", str(project))
+            if not (token.endswith(".py") or token.endswith(".sh")):
+                continue
+            if "${" in token:
+                # An unresolved placeholder we don't own (e.g. ${PYTHON} glued into the path) — the
+                # harness expands it at run time; we can't resolve it, so don't flag a false miss.
+                continue
+            candidate = Path(token)
+            # Hook paths in settings.hooks.json are relative to the harness directory itself
+            # (.gigacode/), the same root the hash-manifest (SR-8) hashes hooks/skills under.
+            hook_path = candidate if candidate.is_absolute() else harness / token
+            if not hook_path.is_file():
+                problems.append(f"hook referenced in settings.hooks.json not found: {raw}")
 
     return problems
 
