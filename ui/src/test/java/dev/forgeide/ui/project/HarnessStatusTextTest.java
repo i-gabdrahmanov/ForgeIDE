@@ -48,4 +48,20 @@ class HarnessStatusTextTest {
         assertThat(HarnessStatusText.problems(false, "   ")).isEmpty();
         assertThat(HarnessStatusText.problems(false, null)).isEmpty();
     }
+
+    /** T41: a forge harness's own preflight.py prints a JSON payload — render its errors, then
+     * init_needed and warnings (prefixed), instead of dumping raw JSON as bullets. */
+    @Test
+    void problemsRendersForgePreflightJsonPayload() {
+        String json = """
+                {"passed": false,
+                 "errors": [".gigacode/hooks/settings.hooks.json not found — хуки не задеплоены"],
+                 "init_needed": ["ground/pipeline.json not found"],
+                 "warnings": ["Python 3.9: пайплайн требует 3.10+"]}
+                """;
+        assertThat(HarnessStatusText.problems(false, json)).containsExactly(
+                ".gigacode/hooks/settings.hooks.json not found — хуки не задеплоены",
+                "init: ground/pipeline.json not found",
+                "warning: Python 3.9: пайплайн требует 3.10+");
+    }
 }

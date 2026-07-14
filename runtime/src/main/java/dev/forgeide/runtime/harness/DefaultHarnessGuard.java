@@ -43,17 +43,18 @@ public final class DefaultHarnessGuard implements HarnessGuardPort {
 
     @Override
     public DeployResult deploy(Path projectRoot) {
-        migrateLegacySettingsFile(projectRoot);
+        healLayout(projectRoot);
         Map<String, String> manifest = HarnessManifest.scan(projectRoot);
         String hash = HarnessManifest.aggregateHash(manifest);
         copyIntoCache(projectRoot, manifest, HarnessLayout.cacheDir(forgeideHome, hash));
 
         runScript(materialize("deploy.sh"), List.of(projectRoot.toString()));
-        ProcessResult preflight = runScript(materialize("preflight.py"), List.of(projectRoot.toString()));
+        resolveSettings(projectRoot);
+        PreflightRun preflight = runPreflight(projectRoot);
 
         HarnessRegistry.write(forgeideHome, projectRoot, new HarnessRegistry.Entry(manifest, hash,
-                preflight.exitCode() == 0, preflight.output(), Instant.now()));
-        return new DeployResult(hash, preflight.exitCode() == 0, preflight.output());
+                preflight.passed(), preflight.output(), Instant.now()));
+        return new DeployResult(hash, preflight.passed(), preflight.output());
     }
 
     @Override
@@ -180,27 +181,58 @@ public final class DefaultHarnessGuard implements HarnessGuardPort {
         return new HarnessEditResult(oldHash, newHash, "~ modified: " + relativePath + "\n");
     }
 
-    // ---- T32 self-heal ----------------------------------------------------------------------
+    // ---- T41: forge-native deploy (heal → resolve → preflight) ------------------------------
 
-    /** A harness imported before {@code settings.hooks.json} moved to the harness root still keeps
-     * it under {@code hooks/}, where the manifest and {@code preflight.py} don't look for it.
-     * Relocate it to the root before anything hashes the tree — so the cache, baseline and
-     * preflight all see the canonical layout — instead of letting preflight merely warn. No-op
-     * once it already sits at the root (that copy wins), and best-effort: a move that fails leaves
-     * preflight to emit its actionable T32 message, same as before. */
-    private static void migrateLegacySettingsFile(Path projectRoot) {
-        Path root = HarnessLayout.harnessRoot(projectRoot);
-        Path canonical = root.resolve(HarnessLayout.SETTINGS_FILE);
-        Path legacy = root.resolve("hooks").resolve(HarnessLayout.SETTINGS_FILE);
-        if (Files.isRegularFile(canonical) || !Files.isRegularFile(legacy)) {
+    /** T41 self-heal (the reverse of the old T32 move): a project deployed under the old ForgeIDE
+     * convention keeps {@code settings.hooks.json} at the harness root, but forge's resolver and
+     * preflight — and now ForgeIDE — look for the template under {@code hooks/}. Relocate it there
+     * before anything hashes the tree, so the manifest/cache/baseline see the forge layout. No-op
+     * once it already sits under {@code hooks/}, and best-effort: a failed move leaves preflight to
+     * report a template that isn't where it belongs. */
+    private static void healLayout(Path projectRoot) {
+        Path template = HarnessLayout.templateFile(projectRoot);
+        Path legacy = HarnessLayout.harnessRoot(projectRoot).resolve(HarnessLayout.TEMPLATE_FILE);
+        if (Files.isRegularFile(template) || !Files.isRegularFile(legacy)) {
             return;
         }
         try {
-            Files.move(legacy, canonical);
+            Files.createDirectories(template.getParent());
+            Files.move(legacy, template);
         } catch (IOException e) {
-            // best-effort — preflight.py still names the legacy location with a fix hint, same
-            // spirit as rollbackDrift's best-effort deleteIfExists.
+            // best-effort — preflight still names the misplaced template with a fix hint.
         }
+    }
+
+    /** T41: generate the resolved {@code .gigacode/settings.json} the agent runtime (gigacode)
+     * reads. Prefer the harness's own resolver ({@code hooks/resolve_hook_paths.py}) so ForgeIDE
+     * behaves exactly like a forge deploy — same {@code ${PROJECT_ROOT}}/{@code ${PYTHON}}
+     * expansion, same output — and fall back to the bundled {@code resolve.py} for harnesses that
+     * ship none. */
+    private void resolveSettings(Path projectRoot) {
+        Path resolver = HarnessLayout.resolverScript(projectRoot);
+        if (Files.isRegularFile(resolver)) {
+            runScript(resolver, List.of("--project", projectRoot.toString()));
+        } else {
+            runScript(materialize("resolve.py"), List.of(projectRoot.toString()));
+        }
+    }
+
+    /** T41: validate with the harness's own preflight ({@code hooks/preflight.py}) when present,
+     * else the bundled one. The harness preflight's exit codes carry more than pass/fail: 0 = ok,
+     * 2 = deployed but the project isn't initialized yet (enforcement is still on — a fresh deploy
+     * is expected to land here, so it counts as passed, preserving T37's "fresh project deploys
+     * clean"), 1 = enforcement off. */
+    private PreflightRun runPreflight(Path projectRoot) {
+        Path harnessPreflight = HarnessLayout.harnessPreflight(projectRoot);
+        if (Files.isRegularFile(harnessPreflight)) {
+            ProcessResult result = runScript(harnessPreflight, List.of("--project", projectRoot.toString()));
+            return new PreflightRun(result.exitCode() == 0 || result.exitCode() == 2, result.output());
+        }
+        ProcessResult result = runScript(materialize("preflight.py"), List.of(projectRoot.toString()));
+        return new PreflightRun(result.exitCode() == 0, result.output());
+    }
+
+    private record PreflightRun(boolean passed, String output) {
     }
 
     // ---- cache I/O --------------------------------------------------------------------------

@@ -15,10 +15,11 @@ import java.util.TreeMap;
 import java.util.stream.Stream;
 
 /**
- * Scans a project's harness (SDD SR-8: {@code hooks/}, {@code skills/}, {@code
- * settings.hooks.json}, all under {@code <project>/.gigacode/}) into a hash-manifest — relative
- * path -> SHA-256 of that file's bytes — plus a single aggregate hash of the whole manifest, and
- * diffs two such manifests for the {@code STOPPED(harness-drift)} audit payload.
+ * Scans a project's harness (SDD SR-8: {@code hooks/} — which holds the {@code settings.hooks.json}
+ * template (T41) — and {@code skills/}, all under {@code <project>/.gigacode/}) into a hash-manifest
+ * — relative path -> SHA-256 of that file's bytes — plus a single aggregate hash of the whole
+ * manifest, and diffs two such manifests for the {@code STOPPED(harness-drift)} audit payload. The
+ * generated {@code settings.json} at the harness root is excluded (it is derived, not source).
  */
 final class HarnessManifest {
 
@@ -44,10 +45,10 @@ final class HarnessManifest {
                 throw new UncheckedIOException("failed to scan harness directory: " + dir, e);
             }
         }
-        Path settings = root.resolve(HarnessLayout.SETTINGS_FILE);
-        if (Files.isRegularFile(settings)) {
-            manifest.put(HarnessLayout.SETTINGS_FILE, sha256Hex(settings));
-        }
+        // T41: the template lives under hooks/ (hashed by the walk above); the resolved
+        // settings.json at the harness root is deliberately NOT hashed — it is generated from the
+        // template + the project's own path at deploy time, so hashing it would flag drift every
+        // time the project moves and defeat SR-8's point-of-the-source-of-truth check.
         return manifest;
     }
 

@@ -19,8 +19,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
- * Exercises {@link DefaultHarnessGuard} (SDD FR-1.4/FR-8.3/SR-7/SR-8) against a real filesystem
- * and the bundled {@code deploy.sh}/{@code preflight.py} wrappers.
+ * Exercises {@link DefaultHarnessGuard} (SDD FR-1.4/FR-8.3/SR-7/SR-8, T41 forge layout) against a
+ * real filesystem and the bundled {@code deploy.sh}/{@code resolve.py}/{@code preflight.py}
+ * wrappers. The forge layout: the {@code settings.hooks.json} template lives under {@code hooks/},
+ * deploy generates the resolved {@code settings.json} the runtime reads, and preflight validates
+ * that resolved file.
  */
 class DefaultHarnessGuardTest {
 
@@ -44,7 +47,9 @@ class DefaultHarnessGuardTest {
         Instant before = Instant.now();
         HarnessGuardPort.DeployResult result = guard.deploy(project);
 
-        assertThat(result.preflightPassed()).isTrue();
+        assertThat(result.preflightPassed()).as(result.preflightOutput()).isTrue();
+        // T41: deploy generates the resolved settings.json the agent runtime reads.
+        assertThat(project.resolve(".gigacode/settings.json")).isRegularFile();
         HarnessGuardPort.PreflightStatus status = guard.preflightStatus(project);
         assertThat(status.passed()).isTrue();
         // T37: the project card shows this next to the deploy button (SDD FR-1.4).
@@ -54,8 +59,7 @@ class DefaultHarnessGuardTest {
     }
 
     /** T38: a hook reference is routinely a whole command line, not a bare path — preflight
-     * must resolve the script token inside it instead of treating the string as one path
-     * (which rejected every valid imported config as ".gigacode/python3 hooks/..."). */
+     * must resolve the script token inside it instead of treating the string as one path. */
     @Test
     void preflightResolvesHookScriptTokensInsideCommandStrings(@TempDir Path project, @TempDir Path forgeideHome)
             throws IOException {
@@ -63,7 +67,7 @@ class DefaultHarnessGuardTest {
         Path harness = project.resolve(".gigacode");
         Files.createDirectories(harness.resolve("hooks"));
         Files.writeString(harness.resolve("hooks/tdd-guard.py"), "print('guarding')\n");
-        Files.writeString(harness.resolve("settings.hooks.json"), """
+        Files.writeString(harness.resolve("hooks/settings.hooks.json"), """
                 {"hooks": {"PreToolUse": [{"matcher": "Write|Edit", "hooks": [
                   {"type": "command", "command": "python3 hooks/tdd-guard.py"}]}]}}
                 """);
@@ -81,8 +85,8 @@ class DefaultHarnessGuardTest {
             throws IOException {
         assumePython3Available();
         Path harness = project.resolve(".gigacode");
-        Files.createDirectories(harness);
-        Files.writeString(harness.resolve("settings.hooks.json"), """
+        Files.createDirectories(harness.resolve("hooks"));
+        Files.writeString(harness.resolve("hooks/settings.hooks.json"), """
                 {"hooks": {"PreToolUse": [{"matcher": "Write|Edit", "hooks": [
                   {"type": "command", "command": "python3 hooks/missing-guard.py"}]}]}}
                 """);
@@ -94,19 +98,18 @@ class DefaultHarnessGuardTest {
         assertThat(result.preflightOutput()).contains("not found: hooks/missing-guard.py");
     }
 
-    /** T40: hook commands template the project root as ${PROJECT_ROOT} (e.g. pprb-kid's
-     * "${PYTHON} ${PROJECT_ROOT}/.gigacode/hooks/guard.py") — preflight must expand it to the real
-     * project path before checking, instead of resolving the literal placeholder under .gigacode/
-     * and failing a harness whose scripts are all present. ${PYTHON} is a separate interpreter
-     * token and is left alone. */
+    /** T40/T41: hook commands template the project root as ${PROJECT_ROOT} and the interpreter as
+     * ${PYTHON} (e.g. pprb-kid's "${PYTHON} ${PROJECT_ROOT}/.gigacode/hooks/guard.py") — the
+     * resolver expands both at deploy time so the generated settings.json names a real path, and a
+     * harness whose scripts are all present deploys cleanly. */
     @Test
-    void preflightExpandsProjectRootPlaceholderInHookCommands(@TempDir Path project, @TempDir Path forgeideHome)
+    void deployResolvesPlaceholderHookCommandsAndPasses(@TempDir Path project, @TempDir Path forgeideHome)
             throws IOException {
         assumePython3Available();
         Path harness = project.resolve(".gigacode");
         Files.createDirectories(harness.resolve("hooks"));
         Files.writeString(harness.resolve("hooks/guard.py"), "print('guarding')\n");
-        Files.writeString(harness.resolve("settings.hooks.json"), """
+        Files.writeString(harness.resolve("hooks/settings.hooks.json"), """
                 {"hooks": {"PreToolUse": [{"matcher": "Write|Edit", "hooks": [
                   {"type": "command", "command": "${PYTHON} ${PROJECT_ROOT}/.gigacode/hooks/guard.py"}]}]}}
                 """);
@@ -115,17 +118,21 @@ class DefaultHarnessGuardTest {
         HarnessGuardPort.DeployResult result = guard.deploy(project);
 
         assertThat(result.preflightPassed()).as(result.preflightOutput()).isTrue();
+        // ${PROJECT_ROOT} is expanded to the real path in the generated settings.json.
+        String resolved = Files.readString(harness.resolve("settings.json"));
+        assertThat(resolved).contains(project.resolve(".gigacode/hooks/guard.py").toString());
+        assertThat(resolved).doesNotContain("${PROJECT_ROOT}");
     }
 
-    /** T40 counterpart: a ${PROJECT_ROOT}-templated hook that genuinely doesn't exist still fails
-     * preflight, and the problem names the token as written in the config (not the expanded path). */
+    /** T40/T41 counterpart: a ${PROJECT_ROOT}-templated hook that genuinely doesn't exist still
+     * fails preflight — after resolution the missing path is absolute, so the problem names it. */
     @Test
-    void preflightStillFailsWhenAProjectRootTemplatedHookIsMissing(
-            @TempDir Path project, @TempDir Path forgeideHome) throws IOException {
+    void deployFailsWhenAPlaceholderHookIsMissing(@TempDir Path project, @TempDir Path forgeideHome)
+            throws IOException {
         assumePython3Available();
         Path harness = project.resolve(".gigacode");
         Files.createDirectories(harness.resolve("hooks"));
-        Files.writeString(harness.resolve("settings.hooks.json"), """
+        Files.writeString(harness.resolve("hooks/settings.hooks.json"), """
                 {"hooks": {"PreToolUse": [{"matcher": "Write|Edit", "hooks": [
                   {"type": "command", "command": "${PYTHON} ${PROJECT_ROOT}/.gigacode/hooks/missing.py"}]}]}}
                 """);
@@ -134,7 +141,7 @@ class DefaultHarnessGuardTest {
         HarnessGuardPort.DeployResult result = guard.deploy(project);
 
         assertThat(result.preflightPassed()).isFalse();
-        assertThat(result.preflightOutput()).contains("not found: ${PROJECT_ROOT}/.gigacode/hooks/missing.py");
+        assertThat(result.preflightOutput()).contains("missing.py");
     }
 
     @Test
@@ -143,7 +150,7 @@ class DefaultHarnessGuardTest {
         assumePython3Available();
         Path harness = project.resolve(".gigacode");
         Files.createDirectories(harness.resolve("hooks"));
-        Files.writeString(harness.resolve("settings.hooks.json"), """
+        Files.writeString(harness.resolve("hooks/settings.hooks.json"), """
                 {"hooks": {"SubagentStop": ["hooks/does-not-exist.py"]}}
                 """);
         DefaultHarnessGuard guard = new DefaultHarnessGuard(forgeideHome);
@@ -155,17 +162,17 @@ class DefaultHarnessGuardTest {
         assertThat(guard.preflightStatus(project).passed()).isFalse();
     }
 
-    /** T32 self-heal: deploy relocates a legacy settings.hooks.json (under hooks/) to the harness
-     * root instead of failing preflight — a project imported before the path unification deploys
-     * cleanly, and the stale copy under hooks/ is gone. Mirrors ImportEndToEndTest's root-vs-hooks
-     * assertions for a freshly imported harness. */
+    /** T41 self-heal (reverse of the old T32 move): deploy relocates a settings.hooks.json left at
+     * the harness root (old ForgeIDE placement) to hooks/, where the forge resolver/preflight
+     * expect it — a project deployed under the old convention deploys cleanly, the stale root copy
+     * is gone, and the resolved settings.json is generated. */
     @Test
-    void deployMigratesSettingsFromTheOldHooksLocationToTheHarnessRoot(
+    void deployRelocatesRootSettingsTemplateUnderHooks(
             @TempDir Path project, @TempDir Path forgeideHome) throws IOException {
         assumePython3Available();
         Path harness = project.resolve(".gigacode");
-        Files.createDirectories(harness.resolve("hooks"));
-        Files.writeString(harness.resolve("hooks/settings.hooks.json"), """
+        Files.createDirectories(harness);
+        Files.writeString(harness.resolve("settings.hooks.json"), """
                 {"hooks": {"SubagentStop": []}}
                 """);
         DefaultHarnessGuard guard = new DefaultHarnessGuard(forgeideHome);
@@ -173,8 +180,75 @@ class DefaultHarnessGuardTest {
         HarnessGuardPort.DeployResult result = guard.deploy(project);
 
         assertThat(result.preflightPassed()).as(result.preflightOutput()).isTrue();
-        assertThat(harness.resolve("settings.hooks.json")).isRegularFile();
-        assertThat(harness.resolve("hooks/settings.hooks.json")).doesNotExist();
+        assertThat(harness.resolve("hooks/settings.hooks.json")).isRegularFile();
+        assertThat(harness.resolve("settings.hooks.json")).doesNotExist();
+        assertThat(harness.resolve("settings.json")).isRegularFile();
+    }
+
+    /** T41: when the harness ships its own resolver, deploy runs it (not the bundled fallback) so
+     * ForgeIDE behaves exactly like a forge deploy. Proven by a stand-in resolver that stamps a
+     * recognizable marker into the settings.json it writes. */
+    @Test
+    void deployRunsTheHarnessOwnResolverWhenPresent(@TempDir Path project, @TempDir Path forgeideHome)
+            throws IOException {
+        assumePython3Available();
+        Path harness = project.resolve(".gigacode");
+        Files.createDirectories(harness.resolve("hooks"));
+        Files.writeString(harness.resolve("hooks/settings.hooks.json"), """
+                {"hooks": {"SubagentStop": []}}
+                """);
+        Files.writeString(harness.resolve("hooks/resolve_hook_paths.py"), """
+                import sys, json, pathlib
+                proj = sys.argv[sys.argv.index("--project") + 1]
+                target = pathlib.Path(proj) / ".gigacode" / "settings.json"
+                target.write_text(json.dumps({"hooks": {"SubagentStop": []}, "_marker": "harness-resolver"}))
+                """);
+        DefaultHarnessGuard guard = new DefaultHarnessGuard(forgeideHome);
+
+        HarnessGuardPort.DeployResult result = guard.deploy(project);
+
+        assertThat(result.preflightPassed()).as(result.preflightOutput()).isTrue();
+        assertThat(Files.readString(harness.resolve("settings.json"))).contains("harness-resolver");
+    }
+
+    /** T41: when the harness ships its own preflight, deploy runs it and honours its richer exit
+     * codes — exit 2 ("deployed, project not yet initialized") means enforcement is on, so a fresh
+     * deploy counts as passed (preserves T37). */
+    @Test
+    void deployHonoursHarnessPreflightExitTwoAsPassed(@TempDir Path project, @TempDir Path forgeideHome)
+            throws IOException {
+        assumePython3Available();
+        Path harness = project.resolve(".gigacode");
+        Files.createDirectories(harness.resolve("hooks"));
+        Files.writeString(harness.resolve("hooks/settings.hooks.json"), """
+                {"hooks": {"SubagentStop": []}}
+                """);
+        Files.writeString(harness.resolve("hooks/preflight.py"), "import sys; print('init needed'); sys.exit(2)\n");
+        DefaultHarnessGuard guard = new DefaultHarnessGuard(forgeideHome);
+
+        HarnessGuardPort.DeployResult result = guard.deploy(project);
+
+        assertThat(result.preflightPassed()).isTrue();
+        assertThat(result.preflightOutput()).contains("init needed");
+    }
+
+    /** T41 counterpart: the harness preflight's exit 1 means enforcement off — that fails. */
+    @Test
+    void deployHonoursHarnessPreflightExitOneAsFailed(@TempDir Path project, @TempDir Path forgeideHome)
+            throws IOException {
+        assumePython3Available();
+        Path harness = project.resolve(".gigacode");
+        Files.createDirectories(harness.resolve("hooks"));
+        Files.writeString(harness.resolve("hooks/settings.hooks.json"), """
+                {"hooks": {"SubagentStop": []}}
+                """);
+        Files.writeString(harness.resolve("hooks/preflight.py"), "import sys; print('enforcement off'); sys.exit(1)\n");
+        DefaultHarnessGuard guard = new DefaultHarnessGuard(forgeideHome);
+
+        HarnessGuardPort.DeployResult result = guard.deploy(project);
+
+        assertThat(result.preflightPassed()).isFalse();
+        assertThat(result.preflightOutput()).contains("enforcement off");
     }
 
     @Test
@@ -306,7 +380,7 @@ class DefaultHarnessGuardTest {
         Path harness = project.resolve(".gigacode");
         Files.createDirectories(harness.resolve("hooks"));
         Files.copy(vendoredHook("tdd-guard.py"), harness.resolve("hooks/tdd-guard.py"), StandardCopyOption.REPLACE_EXISTING);
-        Files.writeString(harness.resolve("settings.hooks.json"), """
+        Files.writeString(harness.resolve("hooks/settings.hooks.json"), """
                 {"hooks": {"SubagentStop": ["hooks/tdd-guard.py"]}}
                 """);
         DefaultHarnessGuard guard = new DefaultHarnessGuard(forgeideHome);
@@ -318,22 +392,20 @@ class DefaultHarnessGuardTest {
         assertThat(guard.checkDrift(project)).isPresent();
     }
 
-    /** T34's acceptance: the importer now copies a skill's whole directory (not just {@code
-     * SKILL.md}) into {@code .gigacode/skills/<id>/...}, so a file that only exists to be
-     * referenced from SKILL.md's prose — never a judge target, never a hook — still has to trip
-     * the same drift detection any other harness file gets. {@link HarnessManifest#scan} already
-     * walks {@code skills/} generically; this pins that behaviour down for a {@code references/}
-     * path specifically, since no existing test exercised anything under {@code skills/} at all. */
+    /** T34's acceptance: the importer copies a skill's whole directory into {@code
+     * .gigacode/skills/<id>/...}, so a file that only exists to be referenced from SKILL.md's prose
+     * still has to trip the same drift detection any other harness file gets. */
     @Test
     void editingAReferencesFileUnderASkillDirTripsDrift(@TempDir Path project, @TempDir Path forgeideHome)
             throws IOException {
         assumePython3Available();
         Path harness = project.resolve(".gigacode");
         Files.createDirectories(harness.resolve("skills/demo-skill/references"));
+        Files.createDirectories(harness.resolve("hooks"));
         Files.writeString(harness.resolve("skills/demo-skill/SKILL.md"),
                 "---\nname: demo-skill\n---\n\nSee references/notes.md\n");
         Files.writeString(harness.resolve("skills/demo-skill/references/notes.md"), "original notes\n");
-        Files.writeString(harness.resolve("settings.hooks.json"), """
+        Files.writeString(harness.resolve("hooks/settings.hooks.json"), """
                 {"hooks": {"SubagentStop": []}}
                 """);
         DefaultHarnessGuard guard = new DefaultHarnessGuard(forgeideHome);
@@ -359,7 +431,7 @@ class DefaultHarnessGuardTest {
         Path harness = project.resolve(".gigacode");
         Files.createDirectories(harness.resolve("hooks"));
         Files.writeString(harness.resolve("hooks/tdd-guard.py"), "print('guarding')\n");
-        Files.writeString(harness.resolve("settings.hooks.json"), """
+        Files.writeString(harness.resolve("hooks/settings.hooks.json"), """
                 {"hooks": {"SubagentStop": ["hooks/tdd-guard.py"]}}
                 """);
     }
