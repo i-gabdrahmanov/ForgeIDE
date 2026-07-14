@@ -17,7 +17,21 @@ import java.nio.file.Path;
 final class HarnessLayout {
 
     static final String HARNESS_DIR = ".gigacode";
-    static final String SETTINGS_FILE = "settings.hooks.json";
+    /** The placeholder-bearing template a forge harness ships under {@code hooks/} (SD/T41): the
+     * source of truth the resolver expands. Not what the runtime reads — that's {@link
+     * #RESOLVED_FILE}. */
+    static final String TEMPLATE_FILE = "settings.hooks.json";
+    /** The resolved config the agent runtime (gigacode) actually reads, at the harness root —
+     * generated at deploy time from {@link #TEMPLATE_FILE} by {@link #RESOLVER_SCRIPT} (or the
+     * bundled fallback). Never hand-edited, never hashed (it is project-path-derived). */
+    static final String RESOLVED_FILE = "settings.json";
+    /** Harness-provided resolver under {@code hooks/} (forge's {@code resolve_hook_paths.py}):
+     * expands {@code ${PROJECT_ROOT}}/{@code ${PYTHON}} from the template into {@link
+     * #RESOLVED_FILE}. Absent for simple harnesses — then the bundled {@code resolve.py} runs. */
+    static final String RESOLVER_SCRIPT = "resolve_hook_paths.py";
+    /** Harness-provided preflight under {@code hooks/} (forge's {@code preflight.py}): its own,
+     * richer validator. Absent for simple harnesses — then the bundled {@code preflight.py} runs. */
+    static final String HARNESS_PREFLIGHT = "preflight.py";
     static final java.util.List<String> SCRIPT_SUBDIRS = java.util.List.of("hooks", "skills");
 
     private HarnessLayout() {
@@ -25,6 +39,29 @@ final class HarnessLayout {
 
     static Path harnessRoot(Path projectRoot) {
         return projectRoot.resolve(HARNESS_DIR);
+    }
+
+    static Path hooksDir(Path projectRoot) {
+        return harnessRoot(projectRoot).resolve("hooks");
+    }
+
+    /** {@code <project>/.gigacode/hooks/settings.hooks.json} — the forge-native template location
+     * (T41), where the resolver and the harness's own preflight look for it. */
+    static Path templateFile(Path projectRoot) {
+        return hooksDir(projectRoot).resolve(TEMPLATE_FILE);
+    }
+
+    /** {@code <project>/.gigacode/settings.json} — the resolved config gigacode reads at run time. */
+    static Path resolvedFile(Path projectRoot) {
+        return harnessRoot(projectRoot).resolve(RESOLVED_FILE);
+    }
+
+    static Path resolverScript(Path projectRoot) {
+        return hooksDir(projectRoot).resolve(RESOLVER_SCRIPT);
+    }
+
+    static Path harnessPreflight(Path projectRoot) {
+        return hooksDir(projectRoot).resolve(HARNESS_PREFLIGHT);
     }
 
     static Path defaultForgeideHome() {

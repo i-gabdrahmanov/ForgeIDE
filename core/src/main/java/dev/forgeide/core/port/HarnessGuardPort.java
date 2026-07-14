@@ -8,9 +8,10 @@ import java.util.Optional;
 
 /**
  * Harness-integrity port (SD §4/§6.1, SDD FR-1.4/FR-8.3/SR-7/SR-8/Т-7): guards the project's
- * agent harness — {@code <project>/.gigacode/{hooks,skills}/} and {@code
- * <project>/.gigacode/settings.hooks.json} — the trusted-code-in-untrusted-environment layer an
- * agent phase runs with full OS-user write access next to.
+ * agent harness — {@code <project>/.gigacode/{hooks,skills}/}, whose {@code
+ * hooks/settings.hooks.json} template deploy resolves into the {@code settings.json} the runtime
+ * reads (T41) — the trusted-code-in-untrusted-environment layer an agent phase runs with full
+ * OS-user write access next to.
  *
  * <ul>
  *   <li>{@link #deploy} builds the hash-manifest, copies the harness into the IDE's own {@code

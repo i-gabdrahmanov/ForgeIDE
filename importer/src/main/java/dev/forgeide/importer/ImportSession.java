@@ -156,13 +156,14 @@ public final class ImportSession {
                     .ifPresent(skillId -> stepToRegistryId.put(baseStepId(matched.key()), skillId));
         }
 
-        // T32: settings.hooks.json lands at the harness root, not under hooks/ — that's where
-        // preflight.py and HarnessLayout.SETTINGS_FILE / the hash-manifest expect to find it.
-        // T38: and the hook scripts that config references travel with it — settings.hooks.json
-        // alone is not a deployable harness (preflight.py verifies every *.py/*.sh the config
-        // names exists under .gigacode/, and gigacode has to find them there at run time).
+        // T41: the settings.hooks.json template lands under hooks/ (the forge-native layout) —
+        // that's where the resolver (hooks/resolve_hook_paths.py) and both preflights look for it;
+        // deploy then generates the resolved settings.json gigacode reads at run time.
+        // T38: and the hook scripts that config references travel with it — the template alone is
+        // not a deployable harness (preflight verifies every *.py/*.sh it names exists under
+        // .gigacode/, and gigacode has to find them there at run time).
         catalog.hooksFile().ifPresent(hooks -> {
-            files.put(Path.of(".gigacode/settings.hooks.json"), readString(hooks));
+            files.put(Path.of(".gigacode/hooks/settings.hooks.json"), readString(hooks));
             copyHookScripts(catalog.root(), hooks, files);
         });
         // T34: the whole skill directory travels, not just SKILL.md — a skill whose SKILL.md
@@ -208,11 +209,12 @@ public final class ImportSession {
     }
 
     /** Copies every file sitting under {@code hooksFile}'s directory (the scaffold's hook
-     * scripts — {@code settings.hooks.json} itself already went to the harness root) into
-     * {@code files} under {@code .gigacode/hooks/...}, {@link ScaffoldScanner#SKIP_DIRS}-filtered
-     * like {@link #copySkillDir} (T38). No-op when the config sits at the scaffold root: there
-     * is no hooks directory to speak of then, and walking the root would swallow the whole
-     * checkout. */
+     * scripts — including the harness's own {@code resolve_hook_paths.py}/{@code preflight.py} when
+     * present; {@code settings.hooks.json} itself is written explicitly by the caller under
+     * {@code hooks/} and skipped here to avoid a double copy) into {@code files} under {@code
+     * .gigacode/hooks/...}, {@link ScaffoldScanner#SKIP_DIRS}-filtered like {@link #copySkillDir}
+     * (T38). No-op when the config sits at the scaffold root: there is no hooks directory to speak
+     * of then, and walking the root would swallow the whole checkout. */
     private static void copyHookScripts(Path scaffoldRoot, Path hooksFile, Map<Path, String> files) {
         Path dir = hooksFile.getParent();
         if (dir == null || dir.equals(scaffoldRoot)) {

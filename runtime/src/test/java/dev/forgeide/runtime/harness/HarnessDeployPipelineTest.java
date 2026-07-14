@@ -83,7 +83,7 @@ class HarnessDeployPipelineTest {
         Path harness = project.resolve(".gigacode");
         Files.createDirectories(harness.resolve("hooks"));
         Files.writeString(harness.resolve("hooks/tdd-guard.py"), "print('guarding')\n");
-        Files.writeString(harness.resolve("settings.hooks.json"), """
+        Files.writeString(harness.resolve("hooks/settings.hooks.json"), """
                 {"hooks": {"SubagentStop": ["hooks/tdd-guard.py"]}}
                 """);
     }

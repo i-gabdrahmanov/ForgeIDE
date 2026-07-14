@@ -125,23 +125,31 @@ CLI агента (`claude`/`gigacode`) ставится отдельно и пр
 
 ## 5. Обвязка: деплой и preflight
 
-Прогон стартует только если обвязка проекта «задеплоена»: снят hash-манифест
-(baseline), прошёл `preflight.py` (существует `.gigacode/settings.hooks.json`,
-он валидный JSON, каждый скрипт `*.py`/`*.sh`, упомянутый в нём — в том числе
-внутри командных строк вида `python3 hooks/tdd-guard.py` — есть на диске).
-Иначе прогон сразу встаёт с причиной `HARNESS_PREFLIGHT`.
+ForgeIDE работает по нативной модели forge-обвязки (T41): эталон
+`.gigacode/hooks/settings.hooks.json` с плейсхолдерами `${PROJECT_ROOT}`/`${PYTHON}`
+— источник правды, а рантайм (gigacode) читает **резолвнутый** `.gigacode/settings.json`.
 
-На карточке проекта — раздел **Harness**: кнопка **Deploy harness** и статус
-рядом с ней. Клик запускает `deploy.sh` + `preflight.py` по-настоящему и
-показывает результат:
+**Deploy harness** делает по шагам:
 
-- зелёным — `deployed, preflight passed (baseline <когда>)`;
-- красным — `preflight FAILED`, а под кнопкой — вывод `preflight.py` списком
-  проблем (отсутствующий скрипт хука, невалидный JSON).
+1. приводит раскладку к forge-виду (если эталон лежит в корне `.gigacode/` от старой
+   версии ForgeIDE — переносит его под `hooks/`);
+2. снимает hash-манифест обвязки (baseline) — эталон под `hooks/` + `skills/`;
+   `settings.json` не хешируется (он производный);
+3. **генерит `.gigacode/settings.json`**: запускает резолвер самой обвязки
+   `hooks/resolve_hook_paths.py` (разворачивает плейсхолдеры), а если его нет —
+   встроенный `resolve.py`;
+4. прогоняет preflight: собственный `hooks/preflight.py` обвязки, если он есть,
+   иначе встроенный. Прогон стартует только если preflight прошёл; иначе — причина
+   `HARNESS_PREFLIGHT`.
 
-Проект, импортированный давно, может иметь `settings.hooks.json` в
-`.gigacode/hooks/` вместо корня `.gigacode/` — **Deploy harness** сам переносит
-его в корень перед preflight, ручной перенос не нужен.
+На карточке проекта — раздел **Harness**: кнопка **Deploy harness** и статус:
+
+- зелёным — `deployed, preflight passed (baseline <когда>)`. Для forge-обвязки
+  «passed» включает и состояние «задеплоено, но проект ещё не инициализирован»
+  (forge-preflight exit 2) — энфорсмент включён, инициализация конфига идёт при
+  первом прогоне пайплайна;
+- красным — `preflight FAILED`, а под кнопкой — список проблем (для forge-обвязки —
+  её `errors`/`init_needed`/`warnings`; для встроенного preflight — построчно).
 
 Если прогон встал с причиной `HARNESS_PREFLIGHT`, run view показывает баннер
 с подсказкой и кнопкой **Go to project card** — задеплойте обвязку там и

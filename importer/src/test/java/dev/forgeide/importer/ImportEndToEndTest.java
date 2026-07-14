@@ -53,10 +53,10 @@ class ImportEndToEndTest {
         assertThat(projectRoot.resolve("prompts/lite-green.md")).isRegularFile();
         assertThat(projectRoot.resolve(".gigacode/skills/forgelite/scripts/check_tests_red.py")).isRegularFile();
         assertThat(projectRoot.resolve(".gigacode/skills/forgelite/scripts/check_coverage.py")).isRegularFile();
-        // T32: settings.hooks.json must land at the harness root, where preflight.py and the
-        // hash-manifest look for it — not under hooks/ (the old, broken location).
-        assertThat(projectRoot.resolve(".gigacode/settings.hooks.json")).isRegularFile();
-        assertThat(projectRoot.resolve(".gigacode/hooks/settings.hooks.json")).doesNotExist();
+        // T41: the settings.hooks.json template lands under hooks/ (forge layout) — where the
+        // resolver and preflight look for it; deploy then generates the resolved settings.json.
+        assertThat(projectRoot.resolve(".gigacode/hooks/settings.hooks.json")).isRegularFile();
+        assertThat(projectRoot.resolve(".gigacode/settings.hooks.json")).doesNotExist();
         // T38: the hook scripts that config references travel with it — without them the
         // deployed harness fails preflight (see ImportDeployPreflightChainTest).
         assertThat(projectRoot.resolve(".gigacode/hooks/tdd-guard.py")).isRegularFile();
